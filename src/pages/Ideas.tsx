@@ -28,11 +28,39 @@ const CATEGORY_COLORS: Record<string, string> = {
   "Environment/Space": "bg-teal-500/20 text-teal-400 border-teal-500/30",
 };
 
+function normalizeIdeaText(value: unknown): string {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(String).join("\n");
+  return String(value);
+}
+
+function normalizeIdeaTags(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(String).filter(Boolean);
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function keyFeaturesToHtml(value: unknown): string {
+  const s = normalizeIdeaText(value).trim();
+  return s.replace(/^- /gm, "• ").replace(/\n/g, "<br/>");
+}
+
 function IdeaCard({ idea, onClick }: { idea: any; onClick: () => void }) {
   const isProcessing = idea.status === "processing";
   const isProcessed = idea.status === "processed" || idea.status === "brainstorming" || idea.status === "scrapped";
   const isScrapped = idea.status === "scrapped";
   const categoryClass = CATEGORY_COLORS[idea.category] || "bg-secondary text-secondary-foreground";
+  const previewText = normalizeIdeaText(
+    isProcessed && idea.processed_summary ? idea.processed_summary : idea.raw_dump,
+  );
+  const previewTrunc = previewText.slice(0, 140) + (previewText.length > 140 ? "…" : "");
+  const tags = normalizeIdeaTags(idea.tags);
 
   return (
     <Card
@@ -66,22 +94,20 @@ function IdeaCard({ idea, onClick }: { idea: any; onClick: () => void }) {
         </div>
       </CardHeader>
       <CardContent className="px-4 pb-3 pt-0 space-y-1">
-        {isProcessed && idea.title ? (
-          <p className="text-sm font-bold leading-snug">{idea.title}</p>
+        {isProcessed && normalizeIdeaText(idea.title).trim() ? (
+          <p className="text-sm font-bold leading-snug">{normalizeIdeaText(idea.title)}</p>
         ) : null}
         <p className="text-sm text-muted-foreground leading-relaxed line-clamp-2">
-          {isProcessed && idea.processed_summary
-            ? idea.processed_summary
-            : idea.raw_dump.slice(0, 140) + (idea.raw_dump.length > 140 ? "…" : "")}
+          {previewTrunc}
         </p>
 
-        {isProcessed && idea.tags && idea.tags.length > 0 && (
+        {isProcessed && tags.length > 0 && (
           <div className="flex flex-wrap gap-1">
-            {idea.tags.slice(0, 4).map((tag: string) => (
+            {tags.slice(0, 4).map((tag: string) => (
               <Badge key={tag} variant="secondary" className="text-[10px]">{tag}</Badge>
             ))}
-            {idea.tags.length > 4 && (
-              <Badge variant="secondary" className="text-[10px]">+{idea.tags.length - 4}</Badge>
+            {tags.length > 4 && (
+              <Badge variant="secondary" className="text-[10px]">+{tags.length - 4}</Badge>
             )}
           </div>
         )}
@@ -98,6 +124,10 @@ function IdeaListRow({ idea, onClick }: { idea: any; onClick: () => void }) {
   const isProcessed = idea.status === "processed" || idea.status === "brainstorming" || idea.status === "scrapped";
   const isScrapped = idea.status === "scrapped";
   const categoryClass = CATEGORY_COLORS[idea.category] || "bg-secondary text-secondary-foreground";
+  const snippet = normalizeIdeaText(
+    isProcessed && idea.processed_summary ? idea.processed_summary : idea.raw_dump,
+  ).slice(0, 80);
+  const listTags = normalizeIdeaTags(idea.tags);
 
   return (
     <div
@@ -112,13 +142,15 @@ function IdeaListRow({ idea, onClick }: { idea: any; onClick: () => void }) {
       ) : (
         <Badge variant="secondary" className="text-[10px] shrink-0">New</Badge>
       )}
-      <span className="text-sm font-medium truncate min-w-0 max-w-[200px]">{idea.title || "Untitled"}</span>
-      <span className="text-xs text-muted-foreground truncate overflow-hidden min-w-0 flex-1 hidden sm:block">
-        {(isProcessed && idea.processed_summary ? idea.processed_summary : idea.raw_dump || "").slice(0, 80)}
+      <span className="text-sm font-medium truncate min-w-0 max-w-[200px]">
+        {normalizeIdeaText(idea.title).trim() || "Untitled"}
       </span>
-      {idea.tags?.length > 0 && (
+      <span className="text-xs text-muted-foreground truncate overflow-hidden min-w-0 flex-1 hidden sm:block">
+        {snippet}
+      </span>
+      {listTags.length > 0 && (
         <div className="hidden md:flex gap-1 shrink-0">
-          {idea.tags.slice(0, 2).map((t: string) => (
+          {listTags.slice(0, 2).map((t: string) => (
             <Badge key={t} variant="secondary" className="text-[10px]">{t}</Badge>
           ))}
         </div>
@@ -198,6 +230,10 @@ function IdeaDetailModal({
 
   if (!idea) return null;
 
+  const modalTags = normalizeIdeaTags(idea.tags);
+  const summaryText = normalizeIdeaText(idea.processed_summary).trim();
+  const keyFeaturesText = normalizeIdeaText(idea.key_features).trim();
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-2xl h-[85vh] flex flex-col p-0 gap-0 [&>button]:hidden">
@@ -207,7 +243,9 @@ function IdeaDetailModal({
               <ChevronLeft className="h-4 w-4" />
             </Button>
           )}
-          <DialogTitle className="flex-1 text-lg font-semibold leading-none tracking-tight">{idea.title || "Idea Details"}</DialogTitle>
+          <DialogTitle className="flex-1 text-lg font-semibold leading-none tracking-tight">
+            {normalizeIdeaText(idea.title).trim() || "Idea Details"}
+          </DialogTitle>
           {onNext && (
             <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={onNext}>
               <ChevronRight className="h-4 w-4" />
@@ -259,29 +297,29 @@ function IdeaDetailModal({
           <div>
             <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Raw Dump</p>
             <div className="rounded-lg bg-muted/50 p-3 text-sm text-muted-foreground whitespace-pre-wrap">
-              {idea.raw_dump}
+              {normalizeIdeaText(idea.raw_dump)}
             </div>
           </div>
 
-          {idea.processed_summary && (
+          {summaryText ? (
             <div>
               <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Summary</p>
-              <p className="text-sm leading-relaxed">{idea.processed_summary}</p>
+              <p className="text-sm leading-relaxed">{normalizeIdeaText(idea.processed_summary)}</p>
             </div>
-          )}
+          ) : null}
 
-          {idea.key_features && (
+          {keyFeaturesText ? (
             <div>
               <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Key Features</p>
               <div className="text-sm text-muted-foreground prose prose-sm max-w-none [&_ul]:mt-0 [&_ul]:mb-0 [&_li]:my-0">
-                <div dangerouslySetInnerHTML={{ __html: idea.key_features.replace(/^- /gm, "• ").replace(/\n/g, "<br/>") }} />
+                <div dangerouslySetInnerHTML={{ __html: keyFeaturesToHtml(idea.key_features) }} />
               </div>
             </div>
-          )}
+          ) : null}
 
-          {idea.tags && idea.tags.length > 0 && (
+          {modalTags.length > 0 && (
             <div className="flex flex-wrap gap-1 pb-4">
-              {idea.tags.map((tag: string) => (
+              {modalTags.map((tag: string) => (
                 <Badge key={tag} variant="secondary" className="text-xs">{tag}</Badge>
               ))}
             </div>
@@ -528,16 +566,16 @@ export default function IdeasPage() {
 
   const startBrainstorm = useMutation({
     mutationFn: async (idea: any) => {
-      const title = idea.title || "Brainstorm";
+      const title = normalizeIdeaText(idea.title).trim() || "Brainstorm";
       const now = new Date().toISOString();
       const row = await insertRow("brainstorms", {
         idea_id: idea.id,
         title,
         user_id: user!.id,
-        compiled_description: idea.processed_summary || "",
-        bullet_breakdown: idea.key_features || "",
+        compiled_description: normalizeIdeaText(idea.processed_summary),
+        bullet_breakdown: normalizeIdeaText(idea.key_features),
         category: idea.category || null,
-        tags: idea.tags ?? [],
+        tags: normalizeIdeaTags(idea.tags),
         status: "active",
         chat_history: [],
         assistant_chat_history: [],
