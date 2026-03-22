@@ -16,6 +16,8 @@ interface AuthContextType {
   loading: boolean;
   signIn: () => Promise<void>;
   signOut: () => Promise<void>;
+  /** Current Google OAuth access token (same source as {@link @/lib/google-api}). */
+  getAccessToken: () => string | null;
 }
 
 function mapUserInfo(info: {
@@ -104,6 +106,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setLoading(false);
   }, []);
 
+  const getAccessToken = useCallback(() => GoogleAPI.getAccessToken(), []);
+
   const value = useMemo<AuthContextType>(
     () => ({
       session: user ? { user } : null,
@@ -111,8 +115,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       loading,
       signIn,
       signOut,
+      getAccessToken,
     }),
-    [user, loading, signIn, signOut],
+    [user, loading, signIn, signOut, getAccessToken],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
