@@ -75,7 +75,6 @@ const loadGapi = () => {
                 gapi.load('client', async () => {
                     try {
                         await gapi.client.init({
-                            apiKey: API_KEY,
                             discoveryDocs: ['https://www.googleapis.com/discovery/v1/apis/drive/v3/rest']
                         });
                         gapiLoaded = true;
