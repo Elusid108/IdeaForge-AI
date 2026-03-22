@@ -19,7 +19,9 @@ export type CoreTableName =
   | "projects"
   | "brainstorms"
   | "campaigns"
-  | "project_tasks";
+  | "project_tasks"
+  | "campaign_tasks"
+  | "gotchas";
 
 /** Column order matches Supabase `Row` shapes from idea-forge types. */
 export const TABLE_HEADERS: Record<CoreTableName, readonly string[]> = {
@@ -42,6 +44,7 @@ export const TABLE_HEADERS: Record<CoreTableName, readonly string[]> = {
     "bullet_breakdown",
     "campaign_id",
     "category",
+    "chat_history",
     "compiled_description",
     "created_at",
     "deleted_at",
@@ -69,6 +72,7 @@ export const TABLE_HEADERS: Record<CoreTableName, readonly string[]> = {
     "title",
     "updated_at",
     "user_id",
+    "assistant_chat_history",
   ],
   campaigns: [
     "category",
@@ -94,6 +98,7 @@ export const TABLE_HEADERS: Record<CoreTableName, readonly string[]> = {
     "units_sold",
     "updated_at",
     "user_id",
+    "assistant_chat_history",
   ],
   project_tasks: [
     "completed",
@@ -108,6 +113,29 @@ export const TABLE_HEADERS: Record<CoreTableName, readonly string[]> = {
     "title",
     "updated_at",
     "user_id",
+  ],
+  campaign_tasks: [
+    "campaign_id",
+    "completed",
+    "created_at",
+    "description",
+    "due_date",
+    "id",
+    "parent_task_id",
+    "priority",
+    "sort_order",
+    "status_column",
+    "title",
+    "user_id",
+  ],
+  gotchas: [
+    "chat_history",
+    "created_at",
+    "id",
+    "project_id",
+    "root_cause",
+    "status",
+    "symptom",
   ],
 } as const;
 
@@ -316,6 +344,355 @@ async function getSheetNumericId(
   return id;
 }
 
+async function fetchSheetTitles(spreadsheetId: string): Promise<Set<string>> {
+  const url = `${SHEETS_API}/${encodeURIComponent(spreadsheetId)}?fields=sheets(properties(title))`;
+  const res = await authorizedFetch(url, { method: "GET" }, true);
+  if (!res.ok) {
+    throw new Error(
+      `Failed to load spreadsheet: ${res.status} ${await parseGoogleError(res)}`,
+    );
+  }
+  const data = (await res.json()) as {
+    sheets?: { properties?: { title?: string } }[];
+  };
+  return new Set(
+    (data.sheets ?? [])
+      .map((s) => s.properties?.title)
+      .filter((t): t is string => !!t),
+  );
+}
+
+/**
+ * Adds any missing worksheets from {@link TABLE_HEADERS} and writes header row 1.
+ */
+export async function ensureMissingWorksheets(spreadsheetId: string): Promise<void> {
+  const titles = await fetchSheetTitles(spreadsheetId);
+  const missing = (Object.keys(TABLE_HEADERS) as CoreTableName[]).filter(
+    (name) => !titles.has(name),
+  );
+  if (missing.length === 0) return;
+
+  const requests = missing.map((title) => ({
+    addSheet: { properties: { title } },
+  }));
+  const batchUrl = `${SHEETS_API}/${encodeURIComponent(spreadsheetId)}:batchUpdate`;
+  const batchRes = await authorizedFetch(
+    batchUrl,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requests }),
+    },
+    true,
+  );
+  if (!batchRes.ok) {
+    throw new Error(
+      `Failed to add worksheets: ${batchRes.status} ${await parseGoogleError(batchRes)}`,
+    );
+  }
+  sheetIdCache.delete(spreadsheetId);
+
+  const data = (
+    missing.map((name) => ({
+      range: `${escapeSheetName(name)}!A1:${colIndexToLetter(TABLE_HEADERS[name].length - 1)}1`,
+      values: [TABLE_HEADERS[name].slice() as string[]],
+    }))
+  );
+  const batchValuesRes = await authorizedFetch(
+    `${SHEETS_API}/${encodeURIComponent(spreadsheetId)}/values:batchUpdate`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        valueInputOption: "USER_ENTERED",
+        data,
+      }),
+    },
+    true,
+  );
+  if (!batchValuesRes.ok) {
+    throw new Error(
+      `Failed to write new sheet headers: ${batchValuesRes.status} ${await parseGoogleError(batchValuesRes)}`,
+    );
+  }
+}
+
+const LEGACY_PROJECTS_HEADER_WITHOUT_CHAT: readonly string[] = [
+  "brainstorm_id",
+  "bullet_breakdown",
+  "campaign_id",
+  "category",
+  "compiled_description",
+  "created_at",
+  "deleted_at",
+  "execution_strategy",
+  "general_notes",
+  "github_repo_url",
+  "id",
+  "name",
+  "status",
+  "tags",
+  "updated_at",
+  "user_id",
+];
+
+/**
+ * Inserts the `chat_history` column on `projects` when upgrading spreadsheets created before it existed.
+ */
+const LEGACY_BRAINSTORM_HEADER_WITHOUT_ASSISTANT: readonly string[] = [
+  "bullet_breakdown",
+  "category",
+  "chat_history",
+  "compiled_description",
+  "created_at",
+  "deleted_at",
+  "id",
+  "idea_id",
+  "status",
+  "tags",
+  "title",
+  "updated_at",
+  "user_id",
+];
+
+/**
+ * Appends `assistant_chat_history` for the floating assistant widget on legacy sheets.
+ */
+export async function migrateBrainstormAssistantChatColumn(
+  spreadsheetId: string,
+): Promise<void> {
+  const range = `${escapeSheetName("brainstorms")}!A1:ZZ1`;
+  const getUrl = `${SHEETS_API}/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}`;
+  const getRes = await authorizedFetch(getUrl, { method: "GET" }, true);
+  if (!getRes.ok) return;
+  const json = (await getRes.json()) as { values?: string[][] };
+  const row = json.values?.[0];
+  if (!row || row.includes("assistant_chat_history")) return;
+
+  const legacy = LEGACY_BRAINSTORM_HEADER_WITHOUT_ASSISTANT;
+  if (row.length !== legacy.length || row.some((c, i) => c !== legacy[i])) {
+    return;
+  }
+
+  const sheetId = await getSheetNumericId(spreadsheetId, "brainstorms");
+  const batchUrl = `${SHEETS_API}/${encodeURIComponent(spreadsheetId)}:batchUpdate`;
+  const insRes = await authorizedFetch(
+    batchUrl,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        requests: [
+          {
+            insertDimension: {
+              range: {
+                sheetId,
+                dimension: "COLUMNS",
+                startIndex: 13,
+                endIndex: 14,
+              },
+            },
+          },
+        ],
+      }),
+    },
+    true,
+  );
+  if (!insRes.ok) {
+    throw new Error(
+      `migrate brainstorm assistant column: ${insRes.status} ${await parseGoogleError(insRes)}`,
+    );
+  }
+  sheetIdCache.delete(spreadsheetId);
+
+  const cellRange = `${escapeSheetName("brainstorms")}!N1`;
+  const putUrl = `${SHEETS_API}/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(cellRange)}?valueInputOption=USER_ENTERED`;
+  const putRes = await authorizedFetch(
+    putUrl,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ values: [["assistant_chat_history"]] }),
+    },
+    true,
+  );
+  if (!putRes.ok) {
+    throw new Error(
+      `migrate brainstorm header cell: ${putRes.status} ${await parseGoogleError(putRes)}`,
+    );
+  }
+}
+
+export async function migrateProjectsChatHistoryColumn(
+  spreadsheetId: string,
+): Promise<void> {
+  const range = `${escapeSheetName("projects")}!A1:ZZ1`;
+  const getUrl = `${SHEETS_API}/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}`;
+  const getRes = await authorizedFetch(getUrl, { method: "GET" }, true);
+  if (!getRes.ok) return;
+  const json = (await getRes.json()) as { values?: string[][] };
+  const row = json.values?.[0];
+  if (!row || row.includes("chat_history")) return;
+
+  const legacy = LEGACY_PROJECTS_HEADER_WITHOUT_CHAT;
+  if (row.length !== legacy.length || row.some((c, i) => c !== legacy[i])) {
+    return;
+  }
+
+  const sheetId = await getSheetNumericId(spreadsheetId, "projects");
+  const batchUrl = `${SHEETS_API}/${encodeURIComponent(spreadsheetId)}:batchUpdate`;
+  const insRes = await authorizedFetch(
+    batchUrl,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        requests: [
+          {
+            insertDimension: {
+              range: {
+                sheetId,
+                dimension: "COLUMNS",
+                startIndex: 4,
+                endIndex: 5,
+              },
+            },
+          },
+        ],
+      }),
+    },
+    true,
+  );
+  if (!insRes.ok) {
+    throw new Error(
+      `migrate projects column: ${insRes.status} ${await parseGoogleError(insRes)}`,
+    );
+  }
+  sheetIdCache.delete(spreadsheetId);
+
+  const cellRange = `${escapeSheetName("projects")}!E1`;
+  const putUrl = `${SHEETS_API}/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(cellRange)}?valueInputOption=USER_ENTERED`;
+  const putRes = await authorizedFetch(
+    putUrl,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ values: [["chat_history"]] }),
+    },
+    true,
+  );
+  if (!putRes.ok) {
+    throw new Error(
+      `migrate projects header cell: ${putRes.status} ${await parseGoogleError(putRes)}`,
+    );
+  }
+}
+
+/**
+ * Call after {@link initDatabaseSheet} sets the spreadsheet id. Adds missing tabs and migrates `projects.chat_history`.
+ */
+const LEGACY_CAMPAIGN_HEADER_WITHOUT_ASSISTANT: readonly string[] = [
+  "category",
+  "chat_history",
+  "created_at",
+  "deleted_at",
+  "id",
+  "interview_completed",
+  "ip_strategy",
+  "marketing_links",
+  "marketing_plan",
+  "monetization_plan",
+  "operations_plan",
+  "playbook",
+  "primary_channel",
+  "project_id",
+  "revenue",
+  "sales_model",
+  "status",
+  "tags",
+  "target_price",
+  "title",
+  "units_sold",
+  "updated_at",
+  "user_id",
+];
+
+/**
+ * Appends `assistant_chat_history` for post-interview campaign assistant on legacy sheets.
+ */
+export async function migrateCampaignAssistantChatColumn(
+  spreadsheetId: string,
+): Promise<void> {
+  const range = `${escapeSheetName("campaigns")}!A1:ZZ1`;
+  const getUrl = `${SHEETS_API}/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}`;
+  const getRes = await authorizedFetch(getUrl, { method: "GET" }, true);
+  if (!getRes.ok) return;
+  const json = (await getRes.json()) as { values?: string[][] };
+  const row = json.values?.[0];
+  if (!row || row.includes("assistant_chat_history")) return;
+
+  const legacy = LEGACY_CAMPAIGN_HEADER_WITHOUT_ASSISTANT;
+  if (row.length !== legacy.length || row.some((c, i) => c !== legacy[i])) {
+    return;
+  }
+
+  const sheetId = await getSheetNumericId(spreadsheetId, "campaigns");
+  const batchUrl = `${SHEETS_API}/${encodeURIComponent(spreadsheetId)}:batchUpdate`;
+  const insRes = await authorizedFetch(
+    batchUrl,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        requests: [
+          {
+            insertDimension: {
+              range: {
+                sheetId,
+                dimension: "COLUMNS",
+                startIndex: 23,
+                endIndex: 24,
+              },
+            },
+          },
+        ],
+      }),
+    },
+    true,
+  );
+  if (!insRes.ok) {
+    throw new Error(
+      `migrate campaigns assistant column: ${insRes.status} ${await parseGoogleError(insRes)}`,
+    );
+  }
+  sheetIdCache.delete(spreadsheetId);
+
+  const cellRange = `${escapeSheetName("campaigns")}!X1`;
+  const putUrl = `${SHEETS_API}/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(cellRange)}?valueInputOption=USER_ENTERED`;
+  const putRes = await authorizedFetch(
+    putUrl,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ values: [["assistant_chat_history"]] }),
+    },
+    true,
+  );
+  if (!putRes.ok) {
+    throw new Error(
+      `migrate campaigns header cell: ${putRes.status} ${await parseGoogleError(putRes)}`,
+    );
+  }
+}
+
+export async function ensureDatabaseSchema(): Promise<void> {
+  const spreadsheetId = getSpreadsheetIdOrThrow();
+  await ensureMissingWorksheets(spreadsheetId);
+  await migrateProjectsChatHistoryColumn(spreadsheetId);
+  await migrateBrainstormAssistantChatColumn(spreadsheetId);
+  await migrateCampaignAssistantChatColumn(spreadsheetId);
+}
+
 /**
  * Ensures a spreadsheet named {@link DB_SPREADSHEET_TITLE} exists and has core worksheets + headers.
  */
@@ -352,6 +729,8 @@ export async function initDatabaseSheet(): Promise<{ spreadsheetId: string }> {
           "brainstorms",
           "campaigns",
           "project_tasks",
+          "campaign_tasks",
+          "gotchas",
         ] as CoreTableName[]
       ).map((title) => ({
         properties: { title },
@@ -403,6 +782,8 @@ export async function initDatabaseSheet(): Promise<{ spreadsheetId: string }> {
   cachedSpreadsheetId = spreadsheetId;
   localStorage.setItem(STORAGE_KEY_SPREADSHEET_ID, spreadsheetId);
   sheetIdCache.delete(spreadsheetId);
+
+  await ensureDatabaseSchema();
 
   return { spreadsheetId };
 }

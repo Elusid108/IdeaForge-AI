@@ -24,6 +24,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { useAuth } from "@/contexts/AuthContext";
+import { deleteRow, getRows, insertRow, updateRow } from "@/lib/google-sheets-db";
 import { supabase } from "@/lib/localDb";
 import { gotchaChat, openGeminiSettings, projectChat } from "@/services/ai-service";
 import { toast } from "sonner";
@@ -174,13 +175,24 @@ export default function ProjectWorkspace() {
   const { data: project, isLoading } = useQuery({
     queryKey: ["project", id],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("projects")
-        .select("*, brainstorms(id, title, idea_id, compiled_description, bullet_breakdown)")
-        .eq("id", id!)
-        .single();
-      if (error) throw error;
-      return data;
+      const rows = await getRows("projects");
+      const row = rows.find((r) => r.id === id);
+      if (!row) return null;
+      let brainstorms: Record<string, unknown> | null = null;
+      if (row.brainstorm_id) {
+        const bRows = await getRows("brainstorms");
+        const b = bRows.find((x) => x.id === row.brainstorm_id);
+        if (b) {
+          brainstorms = {
+            id: b.id,
+            title: b.title,
+            idea_id: b.idea_id,
+            compiled_description: b.compiled_description,
+            bullet_breakdown: b.bullet_breakdown,
+          };
+        }
+      }
+      return { ...row, brainstorms };
     },
     enabled: !!id,
   });
@@ -218,13 +230,10 @@ export default function ProjectWorkspace() {
   const { data: tasks = [] } = useQuery({
     queryKey: ["project-tasks", id],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("project_tasks")
-        .select("*")
-        .eq("project_id", id!)
-        .order("sort_order");
-      if (error) throw error;
-      return data;
+      const rows = await getRows("project_tasks", { project_id: id! });
+      return [...rows].sort(
+        (a, b) => Number(a.sort_order ?? 0) - Number(b.sort_order ?? 0),
+      );
     },
     enabled: !!id,
   });
@@ -248,9 +257,12 @@ export default function ProjectWorkspace() {
   const { data: gotchas = [] } = useQuery({
     queryKey: ["project-gotchas", id],
     queryFn: async () => {
-      const { data, error } = await supabase.from("gotchas" as any).select("*").eq("project_id", id!).order("created_at", { ascending: false });
-      if (error) throw error;
-      return data as any[];
+      const rows = await getRows("gotchas", { project_id: id! });
+      return [...rows].sort(
+        (a, b) =>
+          new Date(String(b.created_at ?? 0)).getTime() -
+          new Date(String(a.created_at ?? 0)).getTime(),
+      );
     },
     enabled: !!id,
   });
@@ -267,6 +279,10 @@ export default function ProjectWorkspace() {
       setBullets((project as any).bullet_breakdown || "");
       setGithubUrl(project.github_repo_url || "");
       setExecutionStrategy((project as any).execution_strategy || "");
+      const pch = (project as { chat_history?: ChatMsg[] }).chat_history;
+      if (Array.isArray(pch) && pch.length > 0) {
+        setChatHistory(pch as ChatMsg[]);
+      }
     }
   }, [project]);
 
@@ -316,9 +332,11 @@ export default function ProjectWorkspace() {
   });
 
   const updateProject = useMutation({
-    mutationFn: async (fields: Record<string, any>) => {
-      const { error } = await supabase.from("projects").update(fields).eq("id", id!);
-      if (error) throw error;
+    mutationFn: async (fields: Record<string, unknown>) => {
+      await updateRow("projects", id!, {
+        ...fields,
+        updated_at: new Date().toISOString(),
+      });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["project", id] });
@@ -329,11 +347,14 @@ export default function ProjectWorkspace() {
 
   const deleteProject = useMutation({
     mutationFn: async () => {
+      const now = new Date().toISOString();
       if (project?.brainstorm_id) {
-        await supabase.from("brainstorms").update({ status: "active" }).eq("id", project.brainstorm_id);
+        await updateRow("brainstorms", String(project.brainstorm_id), {
+          status: "active",
+          updated_at: now,
+        });
       }
-      const { error } = await supabase.from("projects").update({ deleted_at: new Date().toISOString() } as any).eq("id", id!);
-      if (error) throw error;
+      await updateRow("projects", id!, { deleted_at: now, updated_at: now });
     },
     onSuccess: () => {
       toast.success("Project moved to trash");
@@ -344,24 +365,37 @@ export default function ProjectWorkspace() {
 
   const launchCampaign = useMutation({
     mutationFn: async () => {
-      const { data: campaignData, error: createErr } = await supabase
-        .from("campaigns" as any)
-        .insert({
-          project_id: id!,
-          user_id: user!.id,
-          title: project?.name || "Untitled Campaign",
-          category: (project as any)?.category || null,
-          tags: (project as any)?.tags || null,
-        })
-        .select()
-        .single();
-      if (createErr) throw createErr;
-      const { error: linkErr } = await supabase
-        .from("projects")
-        .update({ campaign_id: (campaignData as any).id } as any)
-        .eq("id", id!);
-      if (linkErr) throw linkErr;
-      return campaignData as any;
+      const now = new Date().toISOString();
+      const campaignRow = await insertRow("campaigns", {
+        project_id: id!,
+        user_id: user!.id,
+        title: project?.name || "Untitled Campaign",
+        category: (project as any)?.category ?? "",
+        tags: (project as any)?.tags ?? [],
+        chat_history: [],
+        assistant_chat_history: [],
+        interview_completed: false,
+        status: "foundation_ip",
+        created_at: now,
+        updated_at: now,
+        deleted_at: null,
+        playbook: "",
+        ip_strategy: "",
+        marketing_links: "",
+        marketing_plan: "",
+        monetization_plan: "",
+        operations_plan: "",
+        primary_channel: "",
+        revenue: "",
+        sales_model: "",
+        target_price: "",
+        units_sold: "",
+      });
+      await updateRow("projects", id!, {
+        campaign_id: campaignRow.id as string,
+        updated_at: new Date().toISOString(),
+      });
+      return campaignRow;
     },
     onSuccess: (data) => {
       toast.success("Campaign launched!");
@@ -375,13 +409,16 @@ export default function ProjectWorkspace() {
   // Task mutations
   const addTask = useMutation({
     mutationFn: async (fields: any) => {
-      const { error } = await supabase.from("project_tasks").insert({
+      const now = new Date().toISOString();
+      await insertRow("project_tasks", {
         project_id: id!,
         user_id: user!.id,
         ...fields,
         sort_order: tasks.length,
+        completed: fields.completed ?? false,
+        created_at: now,
+        updated_at: now,
       });
-      if (error) throw error;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["project-tasks", id] });
@@ -392,8 +429,10 @@ export default function ProjectWorkspace() {
 
   const updateTask = useMutation({
     mutationFn: async ({ taskId, fields }: { taskId: string; fields: Record<string, any> }) => {
-      const { error } = await supabase.from("project_tasks").update(fields).eq("id", taskId);
-      if (error) throw error;
+      await updateRow("project_tasks", taskId, {
+        ...fields,
+        updated_at: new Date().toISOString(),
+      });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["project-tasks", id] });
@@ -405,8 +444,7 @@ export default function ProjectWorkspace() {
   const deleteTask = useMutation({
     mutationFn: async (taskId: string) => {
       const task = tasks.find((t: any) => t.id === taskId);
-      const { error } = await supabase.from("project_tasks").delete().eq("id", taskId);
-      if (error) throw error;
+      await deleteRow("project_tasks", taskId);
       return task;
     },
     onSuccess: (task) => {
@@ -415,16 +453,24 @@ export default function ProjectWorkspace() {
         pushAction(
           `Delete task "${task.title}"`,
           async () => {
-            await supabase.from("project_tasks").insert({
-              id: task.id, project_id: task.project_id, user_id: task.user_id,
-              title: task.title, description: task.description || "", priority: task.priority,
-              sort_order: task.sort_order, completed: task.completed, parent_task_id: task.parent_task_id,
-              due_date: task.due_date,
+            await insertRow("project_tasks", {
+              id: task.id,
+              project_id: task.project_id,
+              user_id: task.user_id,
+              title: task.title,
+              description: task.description || "",
+              priority: task.priority,
+              sort_order: task.sort_order,
+              completed: task.completed,
+              parent_task_id: task.parent_task_id ?? null,
+              due_date: task.due_date ?? null,
+              created_at: task.created_at ?? new Date().toISOString(),
+              updated_at: new Date().toISOString(),
             });
             queryClient.invalidateQueries({ queryKey: ["project-tasks", id] });
           },
           async () => {
-            await supabase.from("project_tasks").delete().eq("id", task.id);
+            await deleteRow("project_tasks", task.id);
             queryClient.invalidateQueries({ queryKey: ["project-tasks", id] });
           },
         );
@@ -434,18 +480,13 @@ export default function ProjectWorkspace() {
 
   const toggleTaskComplete = useMutation({
     mutationFn: async ({ taskId, completed }: { taskId: string; completed: boolean }) => {
-      // Update the target task
-      const { error } = await supabase.from("project_tasks").update({ completed }).eq("id", taskId);
-      if (error) throw error;
-      // Cascade to all subtasks
+      const now = new Date().toISOString();
+      await updateRow("project_tasks", taskId, { completed, updated_at: now });
       const subtaskIds = (tasks || [])
         .filter((t: any) => t.parent_task_id === taskId)
-        .map((t: any) => t.id);
-      if (subtaskIds.length > 0) {
-        const { error: subError } = await supabase.from("project_tasks")
-          .update({ completed })
-          .in("id", subtaskIds);
-        if (subError) throw subError;
+        .map((t: any) => t.id as string);
+      for (const sid of subtaskIds) {
+        await updateRow("project_tasks", sid, { completed, updated_at: now });
       }
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["project-tasks", id] }),
@@ -466,18 +507,21 @@ export default function ProjectWorkspace() {
     pushAction(
       label,
       async () => {
-        // Undo: restore each task's previous state
+        const now = new Date().toISOString();
         for (const prev of prevStates) {
-          await supabase.from("project_tasks").update({ completed: prev.completed }).eq("id", prev.id);
+          await updateRow("project_tasks", prev.id as string, {
+            completed: prev.completed,
+            updated_at: now,
+          });
         }
         queryClient.invalidateQueries({ queryKey: ["project-tasks", id] });
       },
       async () => {
-        // Redo: re-apply the toggle with cascade
-        await supabase.from("project_tasks").update({ completed: newCompleted }).eq("id", task.id);
-        const subIds = subtasks.map((s: any) => s.id);
-        if (subIds.length > 0) {
-          await supabase.from("project_tasks").update({ completed: newCompleted }).in("id", subIds);
+        const now = new Date().toISOString();
+        await updateRow("project_tasks", task.id, { completed: newCompleted, updated_at: now });
+        const subIds = subtasks.map((s: any) => s.id as string);
+        for (const sid of subIds) {
+          await updateRow("project_tasks", sid, { completed: newCompleted, updated_at: now });
         }
         queryClient.invalidateQueries({ queryKey: ["project-tasks", id] });
       }
@@ -740,13 +784,8 @@ export default function ProjectWorkspace() {
   const { data: linkedIdeaData } = useQuery({
     queryKey: ["linked-idea-for-project", linkedIdeaId],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("ideas")
-        .select("*")
-        .eq("id", linkedIdeaId!)
-        .single();
-      if (error) throw error;
-      return data;
+      const rows = await getRows("ideas", { id: linkedIdeaId! });
+      return rows[0] ?? null;
     },
     enabled: !!linkedIdeaId,
   });
@@ -819,7 +858,8 @@ export default function ProjectWorkspace() {
         // Pass 1: Insert parent tasks and build title->id mapping
         const titleToIdMap = new Map<string, string>();
         for (const action of parentTasks) {
-          const { data: taskData } = await supabase.from("project_tasks").insert({
+          const now = new Date().toISOString();
+          const taskRow = await insertRow("project_tasks", {
             project_id: id!,
             user_id: user!.id,
             title: action.title,
@@ -828,8 +868,11 @@ export default function ProjectWorkspace() {
             due_date: action.due_date || null,
             parent_task_id: null,
             sort_order: tasks.length,
-          } as any).select("id").single();
-          if (taskData) titleToIdMap.set(action.title, taskData.id);
+            completed: false,
+            created_at: now,
+            updated_at: now,
+          });
+          if (taskRow.id) titleToIdMap.set(action.title, taskRow.id as string);
           toast.success(`Task added: ${action.title}`);
         }
 
@@ -853,7 +896,8 @@ export default function ProjectWorkspace() {
               }
             }
           }
-          await supabase.from("project_tasks").insert({
+          const now = new Date().toISOString();
+          await insertRow("project_tasks", {
             project_id: id!,
             user_id: user!.id,
             title: action.title,
@@ -862,7 +906,10 @@ export default function ProjectWorkspace() {
             due_date: action.due_date || null,
             parent_task_id: resolvedParentId,
             sort_order: tasks.length,
-          } as any);
+            completed: false,
+            created_at: now,
+            updated_at: now,
+          });
           toast.success(`Subtask added: ${action.title}`);
         }
 
@@ -874,7 +921,10 @@ export default function ProjectWorkspace() {
         for (const action of otherActions) {
           if (action.action === "update_strategy" && action.strategy) {
             setExecutionStrategy(action.strategy);
-            await supabase.from("projects").update({ execution_strategy: action.strategy } as any).eq("id", id!);
+            await updateRow("projects", id!, {
+              execution_strategy: action.strategy,
+              updated_at: new Date().toISOString(),
+            });
             queryClient.invalidateQueries({ queryKey: ["project", id] });
             toast.success("Execution strategy updated");
           } else if (action.action === "create_note" && action.title) {
@@ -941,7 +991,13 @@ export default function ProjectWorkspace() {
         ...(createdWidgetId ? { widgetId: createdWidgetId, widgetTitle: createdWidgetTitle! } : {}),
         ...(createdLinks.length > 0 ? { links: createdLinks } : {}),
       };
-      setChatHistory([...newHistory, assistantMsg]);
+      const nextChat = [...newHistory, assistantMsg];
+      setChatHistory(nextChat);
+      await updateRow("projects", id!, {
+        chat_history: nextChat,
+        updated_at: new Date().toISOString(),
+      });
+      queryClient.invalidateQueries({ queryKey: ["project", id] });
     } catch (e: unknown) {
       const err = e as Error & { code?: string };
       if (err.code === "NO_API_KEY") openGeminiSettings();
@@ -1309,7 +1365,7 @@ export default function ProjectWorkspace() {
                     )}
                     {!isLocked && (
                       <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-destructive" onClick={async () => {
-                        await supabase.from("gotchas" as any).delete().eq("id", g.id);
+                        await deleteRow("gotchas", g.id as string);
                         queryClient.invalidateQueries({ queryKey: ["project-gotchas", id] });
                       }}><X className="h-3 w-3" /></Button>
                     )}
@@ -2145,13 +2201,16 @@ export default function ProjectWorkspace() {
                     if (!user || !id) return;
                     setIsGotchaThinking(true);
                     try {
-                      const { data: newGotcha, error } = await supabase.from("gotchas").insert({
+                      const now = new Date().toISOString();
+                      const newGotcha = await insertRow("gotchas", {
                         project_id: id,
-                        user_id: user.id,
                         symptom: gotchaSymptom.trim(),
-                      }).select().single();
-                      if (error) throw error;
-                      setActiveGotchaId(newGotcha.id);
+                        status: "open",
+                        chat_history: [],
+                        root_cause: "",
+                        created_at: now,
+                      });
+                      setActiveGotchaId(newGotcha.id as string);
                       const initHistory = [{ role: "user", content: `The gotcha is: ${gotchaSymptom.trim()}` }];
                       setGotchaChatHistory(initHistory);
                       setGotchaWhyRound(1);
@@ -2223,7 +2282,9 @@ export default function ProjectWorkspace() {
                     setGotchaChatHistory(updatedHistory);
                     setGotchaAnswer("");
                     try {
-                      await supabase.from("gotchas").update({ chat_history: updatedHistory as any }).eq("id", activeGotchaId);
+                      await updateRow("gotchas", activeGotchaId, {
+                        chat_history: updatedHistory,
+                      });
                       const data = await gotchaChat({
                         symptom: gotchaSymptom,
                         chat_history: updatedHistory,
@@ -2245,20 +2306,37 @@ export default function ProjectWorkspace() {
                           subtasks = taskData.subtasks || [];
                         }
 
-                        const { data: parentTask } = await supabase.from("project_tasks").insert({
-                          project_id: id!, user_id: user!.id, title, description, priority: "high", sort_order: tasks.length,
-                        }).select("id").single();
+                        const tnow = new Date().toISOString();
+                        const parentTask = await insertRow("project_tasks", {
+                          project_id: id!,
+                          user_id: user!.id,
+                          title,
+                          description,
+                          priority: "high",
+                          sort_order: tasks.length,
+                          completed: false,
+                          parent_task_id: null,
+                          due_date: null,
+                          created_at: tnow,
+                          updated_at: tnow,
+                        });
 
                         if (parentTask && subtasks.length > 0) {
                           for (const sub of subtasks) {
-                            await supabase.from("project_tasks").insert({
-                              project_id: id!, user_id: user!.id,
+                            const st = new Date().toISOString();
+                            await insertRow("project_tasks", {
+                              project_id: id!,
+                              user_id: user!.id,
                               title: sub.title || "Subtask",
                               description: sub.description || "",
                               priority: "high",
                               parent_task_id: parentTask.id,
                               sort_order: tasks.length,
-                            } as any);
+                              completed: false,
+                              due_date: null,
+                              created_at: st,
+                              updated_at: st,
+                            });
                           }
                         }
                         return parentTask;
@@ -2266,13 +2344,16 @@ export default function ProjectWorkspace() {
 
                       if (data?.investigation_task) {
                         await insertTaskWithSubtasks(data.investigation_task, "Investigate");
-                        await supabase.from("gotchas").update({ status: "investigating" } as any).eq("id", activeGotchaId);
+                        await updateRow("gotchas", activeGotchaId, { status: "investigating" });
                         queryClient.invalidateQueries({ queryKey: ["project-gotchas", id] });
                         queryClient.invalidateQueries({ queryKey: ["project-tasks", id] });
                         toast.info("Investigation task created. Go find out!");
                         setShowGotchaModal(false);
                       } else if (data?.root_cause) {
-                        await supabase.from("gotchas").update({ root_cause: data.root_cause, status: "resolved" } as any).eq("id", activeGotchaId);
+                        await updateRow("gotchas", activeGotchaId, {
+                          root_cause: data.root_cause,
+                          status: "resolved",
+                        });
                         if (data.corrective_action_task) {
                           await insertTaskWithSubtasks(data.corrective_action_task, "Fix");
                           queryClient.invalidateQueries({ queryKey: ["project-tasks", id] });

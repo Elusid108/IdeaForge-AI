@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { useAuth } from "@/contexts/AuthContext";
-import { supabase } from "@/lib/localDb";
+import { insertRow } from "@/lib/google-sheets-db";
 import { openGeminiSettings, processIdeaClient } from "@/services/ai-service";
 import { toast } from "sonner";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -30,13 +30,20 @@ export default function MobileDumpIdea() {
 
   const createIdea = useMutation({
     mutationFn: async (raw: string) => {
-      const { data, error } = await supabase
-        .from("ideas")
-        .insert({ raw_dump: raw, user_id: user!.id, status: "processing" })
-        .select()
-        .single();
-      if (error) throw error;
-      return data;
+      const now = new Date().toISOString();
+      return insertRow("ideas", {
+        raw_dump: raw,
+        user_id: user!.id,
+        status: "processing",
+        created_at: now,
+        updated_at: now,
+        category: "",
+        deleted_at: null,
+        key_features: "",
+        processed_summary: "",
+        title: "",
+        tags: [],
+      });
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["ideas"] });
@@ -44,7 +51,10 @@ export default function MobileDumpIdea() {
       setOpen(false);
       setRawDump("");
       toast.success("Idea captured! AI is processing…");
-      void processIdeaClient(supabase, { idea_id: data.id, raw_dump: data.raw_dump })
+      void processIdeaClient({
+        idea_id: data.id as string,
+        raw_dump: String(data.raw_dump ?? ""),
+      })
         .catch((err: unknown) => {
           const e = err as Error & { code?: string };
           if (e.code === "NO_API_KEY") openGeminiSettings();

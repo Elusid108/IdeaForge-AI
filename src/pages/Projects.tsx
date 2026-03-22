@@ -2,7 +2,7 @@ import { Wrench, LayoutGrid, Grid3X3, List, Plus, ArrowUpDown, ChevronDown, Chev
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { supabase } from "@/lib/localDb";
+import { getRows, insertRow } from "@/lib/google-sheets-db";
 import { useAuth } from "@/contexts/AuthContext";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -90,13 +90,14 @@ export default function ProjectsPage() {
   const { data: projects = [], isLoading } = useQuery({
     queryKey: ["projects"],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("projects")
-        .select("*")
-        .is("deleted_at", null)
-        .order("created_at", { ascending: false });
-      if (error) throw error;
-      return data;
+      const rows = await getRows("projects");
+      return rows
+        .filter((r) => r.deleted_at == null || r.deleted_at === "")
+        .sort(
+          (a, b) =>
+            new Date(String(b.created_at || 0)).getTime() -
+            new Date(String(a.created_at || 0)).getTime(),
+        );
     },
   });
 
@@ -105,18 +106,30 @@ export default function ProjectsPage() {
 
   const createProject = useMutation({
     mutationFn: async () => {
-      const { data, error } = await supabase
-        .from("projects")
-        .insert({ user_id: user!.id, name: "Untitled Project" })
-        .select()
-        .single();
-      if (error) throw error;
-      return data;
+      const now = new Date().toISOString();
+      return insertRow("projects", {
+        user_id: user!.id,
+        name: "Untitled Project",
+        status: "planning",
+        created_at: now,
+        updated_at: now,
+        deleted_at: null,
+        brainstorm_id: null,
+        campaign_id: null,
+        category: "",
+        tags: [],
+        general_notes: "",
+        compiled_description: "",
+        bullet_breakdown: "",
+        execution_strategy: "",
+        github_repo_url: "",
+        chat_history: [],
+      });
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["projects"] });
       queryClient.invalidateQueries({ queryKey: ["sidebar-items"] });
-      navigate(`/projects/${data.id}`);
+      navigate(`/projects/${data.id as string}`);
     },
     onError: (e: Error) => toast.error(e.message),
   });

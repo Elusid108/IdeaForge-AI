@@ -11,7 +11,7 @@ import { Separator } from "@/components/ui/separator";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useAuth } from "@/contexts/AuthContext";
-import { supabase } from "@/lib/localDb";
+import { getRows, insertRow, updateRow } from "@/lib/google-sheets-db";
 import { openGeminiSettings, processIdeaClient } from "@/services/ai-service";
 import { toast } from "sonner";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -166,14 +166,10 @@ function IdeaDetailModal({
   const { data: linkedBrainstorm } = useQuery({
     queryKey: ["idea-linked-brainstorm", idea?.id],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("brainstorms")
-        .select("id, title")
-        .eq("idea_id", idea!.id)
-        .is("deleted_at", null)
-        .maybeSingle();
-      if (error) throw error;
-      return data;
+      const rows = await getRows("brainstorms", { idea_id: idea!.id });
+      const row = rows.find((r) => r.deleted_at == null || r.deleted_at === "");
+      if (!row) return null;
+      return { id: row.id as string, title: row.title as string };
     },
     enabled: !!idea?.id,
   });
@@ -181,14 +177,10 @@ function IdeaDetailModal({
   const { data: linkedProject } = useQuery({
     queryKey: ["idea-linked-project", linkedBrainstorm?.id],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("projects")
-        .select("id, name")
-        .eq("brainstorm_id", linkedBrainstorm!.id)
-        .is("deleted_at", null)
-        .maybeSingle();
-      if (error) throw error;
-      return data;
+      const rows = await getRows("projects", { brainstorm_id: linkedBrainstorm!.id });
+      const row = rows.find((r) => r.deleted_at == null || r.deleted_at === "");
+      if (!row) return null;
+      return { id: row.id as string, name: row.name as string };
     },
     enabled: !!linkedBrainstorm?.id,
   });
@@ -196,14 +188,10 @@ function IdeaDetailModal({
   const { data: linkedCampaign } = useQuery({
     queryKey: ["idea-linked-campaign", linkedProject?.id],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("campaigns" as any)
-        .select("id, title")
-        .eq("project_id", linkedProject!.id)
-        .is("deleted_at", null)
-        .maybeSingle();
-      if (error) throw error;
-      return data as any;
+      const rows = await getRows("campaigns", { project_id: linkedProject!.id });
+      const row = rows.find((r) => r.deleted_at == null || r.deleted_at === "");
+      if (!row) return null;
+      return { id: row.id as string, title: row.title as string };
     },
     enabled: !!linkedProject?.id,
   });
@@ -409,13 +397,13 @@ export default function IdeasPage() {
   const { data: ideas = [], isLoading } = useQuery({
     queryKey: ["ideas"],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("ideas")
-        .select("*")
-        .is("deleted_at", null)
-        .order("created_at", { ascending: false });
-      if (error) throw error;
-      return data;
+      const rows = await getRows("ideas");
+      const active = rows.filter((r) => r.deleted_at == null || r.deleted_at === "");
+      return active.sort(
+        (a, b) =>
+          new Date(String(b.created_at || 0)).getTime() -
+          new Date(String(a.created_at || 0)).getTime(),
+      );
     },
     refetchInterval: (query) => {
       const data = query.state.data as any[] | undefined;
@@ -442,14 +430,15 @@ export default function IdeasPage() {
     (async () => {
       let updated = false;
       for (const idea of brainstormingIdeas) {
-        const { data } = await supabase
-          .from("brainstorms")
-          .select("id")
-          .eq("idea_id", idea.id)
-          .is("deleted_at", null)
-          .limit(1);
-        if (!data || data.length === 0) {
-          await supabase.from("ideas").update({ status: "scrapped" }).eq("id", idea.id);
+        const bRows = await getRows("brainstorms", { idea_id: idea.id });
+        const hasBrainstorm = bRows.some(
+          (r) => r.deleted_at == null || r.deleted_at === "",
+        );
+        if (!hasBrainstorm) {
+          await updateRow("ideas", idea.id as string, {
+            status: "scrapped",
+            updated_at: new Date().toISOString(),
+          });
           updated = true;
         }
       }
@@ -461,22 +450,33 @@ export default function IdeasPage() {
 
   const createIdea = useMutation({
     mutationFn: async (raw: string) => {
-      const { data, error } = await supabase
-        .from("ideas")
-        .insert({ raw_dump: raw, user_id: user!.id, status: "processing" })
-        .select()
-        .single();
-      if (error) throw error;
-      return data;
+      const now = new Date().toISOString();
+      const row = await insertRow("ideas", {
+        raw_dump: raw,
+        user_id: user!.id,
+        status: "processing",
+        created_at: now,
+        updated_at: now,
+        category: "",
+        deleted_at: null,
+        key_features: "",
+        processed_summary: "",
+        title: "",
+        tags: [],
+      });
+      return row;
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["ideas"] });
       queryClient.invalidateQueries({ queryKey: ["sidebar-items"] });
       setDumpOpen(false);
       setRawDump("");
-      pendingIdeaIdRef.current = data.id;
+      pendingIdeaIdRef.current = data.id as string;
       toast.success("Idea captured! AI is processing…");
-      void processIdeaClient(supabase, { idea_id: data.id, raw_dump: data.raw_dump })
+      void processIdeaClient({
+        idea_id: data.id as string,
+        raw_dump: String(data.raw_dump ?? ""),
+      })
         .catch((err: unknown) => {
           console.error("AI processing error:", err);
           const e = err as Error & { code?: string };
@@ -493,8 +493,10 @@ export default function IdeasPage() {
 
   const deleteIdea = useMutation({
     mutationFn: async (id: string) => {
-      const { error } = await supabase.from("ideas").update({ deleted_at: new Date().toISOString() } as any).eq("id", id);
-      if (error) throw error;
+      await updateRow("ideas", id, {
+        deleted_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["ideas"] });
@@ -507,8 +509,10 @@ export default function IdeasPage() {
   const scrapIdea = useMutation({
     mutationFn: async ({ id, currentStatus }: { id: string; currentStatus: string }) => {
       const newStatus = currentStatus === "scrapped" ? "processed" : "scrapped";
-      const { error } = await supabase.from("ideas").update({ status: newStatus }).eq("id", id);
-      if (error) throw error;
+      await updateRow("ideas", id, {
+        status: newStatus,
+        updated_at: new Date().toISOString(),
+      });
       return newStatus;
     },
     onSuccess: (newStatus) => {
@@ -525,22 +529,27 @@ export default function IdeasPage() {
   const startBrainstorm = useMutation({
     mutationFn: async (idea: any) => {
       const title = idea.title || "Brainstorm";
-      const { data, error } = await supabase
-        .from("brainstorms")
-        .insert({
-          idea_id: idea.id,
-          title,
-          user_id: user!.id,
-          compiled_description: idea.processed_summary || "",
-          bullet_breakdown: idea.key_features || "",
-          category: idea.category || null,
-          tags: idea.tags || null,
-        } as any)
-        .select()
-        .single();
-      if (error) throw error;
-      await supabase.from("ideas").update({ status: "brainstorming" }).eq("id", idea.id);
-      return data;
+      const now = new Date().toISOString();
+      const row = await insertRow("brainstorms", {
+        idea_id: idea.id,
+        title,
+        user_id: user!.id,
+        compiled_description: idea.processed_summary || "",
+        bullet_breakdown: idea.key_features || "",
+        category: idea.category || null,
+        tags: idea.tags ?? [],
+        status: "active",
+        chat_history: [],
+        assistant_chat_history: [],
+        created_at: now,
+        updated_at: now,
+        deleted_at: null,
+      });
+      await updateRow("ideas", idea.id, {
+        status: "brainstorming",
+        updated_at: new Date().toISOString(),
+      });
+      return row;
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["ideas"] });

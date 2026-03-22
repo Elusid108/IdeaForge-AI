@@ -2,7 +2,7 @@ import { Megaphone, LayoutGrid, Grid3X3, List, ArrowUpDown, ChevronDown, Chevron
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { supabase } from "@/lib/localDb";
+import { getRows } from "@/lib/google-sheets-db";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -82,13 +82,14 @@ export default function CampaignsPage() {
   const { data: campaigns = [], isLoading } = useQuery({
     queryKey: ["campaigns"],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("campaigns" as any)
-        .select("*")
-        .is("deleted_at", null)
-        .order("created_at", { ascending: false });
-      if (error) throw error;
-      return data as any[];
+      const rows = await getRows("campaigns");
+      return rows
+        .filter((r) => r.deleted_at == null || r.deleted_at === "")
+        .sort(
+          (a, b) =>
+            new Date(String(b.created_at || 0)).getTime() -
+            new Date(String(a.created_at || 0)).getTime(),
+        );
     },
   });
 

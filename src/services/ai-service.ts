@@ -2,6 +2,7 @@ import type { GeminiResponse } from "@/types/gemini";
 import { callTextAI } from "@/services/api/apiClient";
 import { getApiKey } from "@/services/storage/geminiSettingsStorage";
 import { useGeminiSettingsStore } from "@/store/useGeminiSettingsStore";
+import { updateRow } from "@/lib/google-sheets-db";
 
 /** Open the Gemini API key modal (e.g. after a missing-key error). */
 export function openGeminiSettings(): void {
@@ -95,11 +96,10 @@ type IdeaProcessJson = {
   key_features: string;
 };
 
-export async function processIdeaClient(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  supabase: any,
-  params: { idea_id: string; raw_dump: string }
-): Promise<void> {
+export async function processIdeaClient(params: {
+  idea_id: string;
+  raw_dump: string;
+}): Promise<void> {
   const { key, model } = getKeyAndModel();
   const system = `You are IdeaForge's idea processor. Read the user's raw brain dump and produce structured JSON.
 category must be exactly one of: ${IDEA_CATEGORIES.join(", ")}.
@@ -110,18 +110,16 @@ processed_summary: 2-4 sentences. title: concise product/idea name.`;
   const category = IDEA_CATEGORIES.includes(out.category as (typeof IDEA_CATEGORIES)[number])
     ? out.category
     : "Software/App";
-  const { error } = await supabase
-    .from("ideas")
-    .update({
-      title: out.title || "Untitled",
-      processed_summary: out.processed_summary || params.raw_dump.slice(0, 500),
-      category,
-      tags: Array.isArray(out.tags) ? out.tags : [],
-      key_features: out.key_features || "",
-      status: "processed",
-    })
-    .eq("id", params.idea_id);
-  if (error) throw error;
+  const now = new Date().toISOString();
+  await updateRow("ideas", params.idea_id, {
+    title: out.title || "Untitled",
+    processed_summary: out.processed_summary || params.raw_dump.slice(0, 500),
+    category,
+    tags: Array.isArray(out.tags) ? out.tags : [],
+    key_features: out.key_features || "",
+    status: "processed",
+    updated_at: now,
+  });
 }
 
 export async function generateExecutionStrategy(body: {

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Brain, Plus, Grid3X3, List, LayoutGrid, ChevronDown, ChevronRight, ArrowUpDown } from "lucide-react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { supabase } from "@/lib/localDb";
+import { getRows, insertRow } from "@/lib/google-sheets-db";
 import { useAuth } from "@/contexts/AuthContext";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -92,30 +92,47 @@ export default function BrainstormsPage() {
   const { data: brainstorms = [], isLoading } = useQuery({
     queryKey: ["brainstorms"],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("brainstorms")
-        .select("*, ideas(processed_summary, raw_dump)")
-        .is("deleted_at", null)
-        .order("created_at", { ascending: false });
-      if (error) throw error;
-      return data;
+      const [rows, ideas] = await Promise.all([
+        getRows("brainstorms"),
+        getRows("ideas"),
+      ]);
+      const ideaMap = new Map(ideas.map((i) => [i.id, i]));
+      const active = rows.filter((r) => r.deleted_at == null || r.deleted_at === "");
+      const merged = active.map((b) => ({
+        ...b,
+        ideas: b.idea_id ? ideaMap.get(b.idea_id) : undefined,
+      }));
+      return merged.sort(
+        (a, b) =>
+          new Date(String(b.created_at || 0)).getTime() -
+          new Date(String(a.created_at || 0)).getTime(),
+      );
     },
   });
 
   const createBrainstorm = useMutation({
     mutationFn: async () => {
-      const { data, error } = await supabase
-        .from("brainstorms")
-        .insert({ user_id: user!.id, title: "Untitled Brainstorm" })
-        .select()
-        .single();
-      if (error) throw error;
-      return data;
+      const now = new Date().toISOString();
+      return insertRow("brainstorms", {
+        user_id: user!.id,
+        title: "Untitled Brainstorm",
+        status: "active",
+        chat_history: [],
+        assistant_chat_history: [],
+        created_at: now,
+        updated_at: now,
+        deleted_at: null,
+        idea_id: null,
+        compiled_description: "",
+        bullet_breakdown: "",
+        category: "",
+        tags: [],
+      });
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["brainstorms"] });
       queryClient.invalidateQueries({ queryKey: ["sidebar-items"] });
-      navigate(`/brainstorms/${data.id}`);
+      navigate(`/brainstorms/${data.id as string}`);
     },
     onError: (e: Error) => toast.error(e.message),
   });

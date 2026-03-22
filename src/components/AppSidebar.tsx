@@ -4,7 +4,7 @@ import { ChevronRight, ChevronDown, LogOut, User, Trash2, Settings } from "lucid
 import IdeaForgeLogo from "@/components/IdeaForgeLogo";
 import { useAuth } from "@/contexts/AuthContext";
 import { NavLink } from "@/components/NavLink";
-import { supabase } from "@/lib/localDb";
+import { getRows } from "@/lib/google-sheets-db";
 import { useQuery } from "@tanstack/react-query";
 import {
   Sidebar,
@@ -39,23 +39,24 @@ function useSectionItems(table: "ideas" | "brainstorms" | "projects" | "campaign
     queryFn: async () => {
       const nameCol = table === "projects" ? "name" : "title";
       const excluded = SIDEBAR_EXCLUDED_STATUSES[table] || [];
-      let query = (supabase
-        .from(table as any)
-        .select(`id, ${nameCol}`) as any)
-        .is("deleted_at", null)
-        .order("created_at", { ascending: false })
-        .limit(20);
-      if (excluded.length > 0) {
-        for (const status of excluded) {
-          query = query.neq("status", status);
-        }
+      const rows = await getRows(table);
+      let list = rows.filter(
+        (r) => r.deleted_at == null || r.deleted_at === "",
+      );
+      for (const st of excluded) {
+        list = list.filter((r) => r.status !== st);
       }
-      const { data, error } = await query;
-      if (error) throw error;
-      return (data || []).map((item: any) => ({
-        id: item.id,
-        title: item[nameCol] || "Untitled",
-      }));
+      return list
+        .sort(
+          (a, b) =>
+            new Date(String(b.created_at || 0)).getTime() -
+            new Date(String(a.created_at || 0)).getTime(),
+        )
+        .slice(0, 20)
+        .map((item) => ({
+          id: item.id as string,
+          title: (item[nameCol] as string) || "Untitled",
+        }));
     },
     enabled,
     staleTime: 5_000,

@@ -21,6 +21,7 @@ import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/h
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
 import { useAuth } from "@/contexts/AuthContext";
+import { deleteRow, getRows, insertRow, updateRow } from "@/lib/google-sheets-db";
 import { supabase } from "@/lib/localDb";
 import { campaignChat, openGeminiSettings } from "@/services/ai-service";
 import { toast } from "sonner";
@@ -144,9 +145,10 @@ export default function CampaignWorkspace() {
   const { data: campaign, isLoading } = useQuery({
     queryKey: ["campaign", id],
     queryFn: async () => {
-      const { data, error } = await supabase.from("campaigns" as any).select("*").eq("id", id!).single();
-      if (error) throw error;
-      return data as any;
+      const rows = await getRows("campaigns", { id: id! });
+      const row = rows[0];
+      if (!row) throw new Error("Campaign not found");
+      return row as Record<string, unknown>;
     },
     enabled: !!id,
   });
@@ -154,11 +156,10 @@ export default function CampaignWorkspace() {
   const { data: linkedProject } = useQuery({
     queryKey: ["campaign-linked-project", campaign?.project_id],
     queryFn: async () => {
-      const { data, error } = await supabase.from("projects")
-        .select("id, name, brainstorm_id, compiled_description, execution_strategy, bullet_breakdown, general_notes, github_repo_url, tags, category")
-        .eq("id", campaign!.project_id).single();
-      if (error) throw error;
-      return data;
+      const rows = await getRows("projects", { id: campaign!.project_id as string });
+      const row = rows[0];
+      if (!row) throw new Error("Project not found");
+      return row as Record<string, unknown>;
     },
     enabled: !!campaign?.project_id,
   });
@@ -166,10 +167,10 @@ export default function CampaignWorkspace() {
   const { data: linkedBrainstorm } = useQuery({
     queryKey: ["campaign-linked-brainstorm", linkedProject?.brainstorm_id],
     queryFn: async () => {
-      const { data, error } = await supabase.from("brainstorms").select("id, title, idea_id")
-        .eq("id", linkedProject!.brainstorm_id!).is("deleted_at", null).maybeSingle();
-      if (error) throw error;
-      return data;
+      const rows = await getRows("brainstorms", { id: linkedProject!.brainstorm_id as string });
+      const row = rows[0];
+      if (!row || (row.deleted_at != null && row.deleted_at !== "")) return null;
+      return { id: row.id as string, title: row.title as string, idea_id: row.idea_id as string | null };
     },
     enabled: !!linkedProject?.brainstorm_id,
   });
@@ -177,10 +178,10 @@ export default function CampaignWorkspace() {
   const { data: linkedIdea } = useQuery({
     queryKey: ["campaign-linked-idea", linkedBrainstorm?.idea_id],
     queryFn: async () => {
-      const { data, error } = await supabase.from("ideas").select("*")
-        .eq("id", linkedBrainstorm!.idea_id!).is("deleted_at", null).maybeSingle();
-      if (error) throw error;
-      return data;
+      const rows = await getRows("ideas", { id: linkedBrainstorm!.idea_id as string });
+      const row = rows[0];
+      if (!row || (row.deleted_at != null && row.deleted_at !== "")) return null;
+      return row;
     },
     enabled: !!linkedBrainstorm?.idea_id,
   });
@@ -188,9 +189,10 @@ export default function CampaignWorkspace() {
   const { data: campaignTasks = [], refetch: refetchTasks } = useQuery({
     queryKey: ["campaign-tasks", id],
     queryFn: async () => {
-      const { data, error } = await supabase.from("campaign_tasks" as any).select("*").eq("campaign_id", id!).order("sort_order");
-      if (error) throw error;
-      return data as any[];
+      const rows = await getRows("campaign_tasks", { campaign_id: id! });
+      return [...rows].sort(
+        (a, b) => Number(a.sort_order ?? 0) - Number(b.sort_order ?? 0),
+      ) as Record<string, unknown>[];
     },
     enabled: !!id,
   });
@@ -271,7 +273,7 @@ export default function CampaignWorkspace() {
   // =================== EFFECTS ===================
   useEffect(() => {
     if (campaign) {
-      setTitleDraft(campaign.title);
+      setTitleDraft(campaign.title as string);
       if (campaign.chat_history && Array.isArray(campaign.chat_history) && campaign.chat_history.length > 0) {
         setInterviewChatHistory(campaign.chat_history as ChatMsg[]);
       }
@@ -279,6 +281,14 @@ export default function CampaignWorkspace() {
   }, [campaign]);
 
   const interviewCompleted = campaign?.interview_completed === true;
+
+  useEffect(() => {
+    if (!campaign || !interviewCompleted) return;
+    const ac = (campaign as { assistant_chat_history?: ChatMsg[] }).assistant_chat_history;
+    if (Array.isArray(ac) && ac.length > 0) {
+      setChatHistory(ac);
+    }
+  }, [campaign?.id, interviewCompleted]);
 
   useEffect(() => {
     if (campaign && !interviewCompleted && !questionLoaded && !isInterviewThinking && linkedProject) {
@@ -350,7 +360,10 @@ export default function CampaignWorkspace() {
       setInterviewChatHistory(finalHistory);
       setCurrentQuestion(next_question);
       setInterviewAnswer("");
-      await supabase.from("campaigns" as any).update({ chat_history: finalHistory }).eq("id", id!);
+      await updateRow("campaigns", id!, {
+        chat_history: finalHistory,
+        updated_at: new Date().toISOString(),
+      });
       queryClient.invalidateQueries({ queryKey: ["campaign", id] });
     } catch (e: unknown) {
       const err = e as Error & { code?: string };
@@ -371,18 +384,34 @@ export default function CampaignWorkspace() {
         context: getInterviewContext(),
       });
       const { playbook, ip_strategy, monetization_plan, marketing_plan, operations_plan, sales_model, primary_channel, tasks } = data;
-      await supabase.from("campaigns" as any).update({
-        playbook, ip_strategy: ip_strategy || "", monetization_plan: monetization_plan || "",
-        marketing_plan: marketing_plan || "", operations_plan: operations_plan || "",
-        sales_model: sales_model || "", primary_channel: primary_channel || "",
-        interview_completed: true, chat_history: interviewChatHistory,
-      }).eq("id", id!);
+      await updateRow("campaigns", id!, {
+        playbook,
+        ip_strategy: ip_strategy || "",
+        monetization_plan: monetization_plan || "",
+        marketing_plan: marketing_plan || "",
+        operations_plan: operations_plan || "",
+        sales_model: sales_model || "",
+        primary_channel: primary_channel || "",
+        interview_completed: true,
+        chat_history: interviewChatHistory,
+        updated_at: new Date().toISOString(),
+      });
       if (tasks && Array.isArray(tasks)) {
+        const now = new Date().toISOString();
         for (let i = 0; i < tasks.length; i++) {
-          const t = tasks[i];
-          await supabase.from("campaign_tasks" as any).insert({
-            campaign_id: id!, user_id: user!.id, title: t.title || "",
-            description: t.description || "", status_column: t.status_column || "foundation_ip", sort_order: i,
+          const t = tasks[i] as { title?: string; description?: string; status_column?: string };
+          await insertRow("campaign_tasks", {
+            campaign_id: id!,
+            user_id: user!.id,
+            title: t.title || "",
+            description: t.description || "",
+            status_column: t.status_column || "foundation_ip",
+            sort_order: i,
+            completed: false,
+            created_at: now,
+            parent_task_id: null,
+            priority: "medium",
+            due_date: null,
           });
         }
       }
@@ -401,9 +430,11 @@ export default function CampaignWorkspace() {
 
   // =================== CAMPAIGN MUTATIONS ===================
   const updateCampaign = useMutation({
-    mutationFn: async (fields: Record<string, any>) => {
-      const { error } = await supabase.from("campaigns" as any).update(fields).eq("id", id!);
-      if (error) throw error;
+    mutationFn: async (fields: Record<string, unknown>) => {
+      await updateRow("campaigns", id!, {
+        ...fields,
+        updated_at: new Date().toISOString(),
+      });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["campaign", id] });
@@ -414,11 +445,14 @@ export default function CampaignWorkspace() {
 
   const deleteCampaign = useMutation({
     mutationFn: async () => {
+      const now = new Date().toISOString();
       if (campaign?.project_id) {
-        await supabase.from("projects").update({ campaign_id: null } as any).eq("id", campaign.project_id);
+        await updateRow("projects", campaign.project_id as string, {
+          campaign_id: null,
+          updated_at: now,
+        });
       }
-      const { error } = await supabase.from("campaigns" as any).update({ deleted_at: new Date().toISOString() }).eq("id", id!);
-      if (error) throw error;
+      await updateRow("campaigns", id!, { deleted_at: now, updated_at: now });
     },
     onSuccess: () => {
       toast.success("Campaign moved to trash");
@@ -435,40 +469,60 @@ export default function CampaignWorkspace() {
 
   // =================== TASK HANDLERS ===================
   const handleToggleTask = async (taskId: string, completed: boolean) => {
-    await supabase.from("campaign_tasks" as any).update({ completed: !completed }).eq("id", taskId);
+    await updateRow("campaign_tasks", taskId, { completed: !completed });
     refetchTasks();
     pushAction(
       completed ? "Mark task active" : "Mark task complete",
-      async () => { await supabase.from("campaign_tasks" as any).update({ completed }).eq("id", taskId); refetchTasks(); },
-      async () => { await supabase.from("campaign_tasks" as any).update({ completed: !completed }).eq("id", taskId); refetchTasks(); },
+      async () => { await updateRow("campaign_tasks", taskId, { completed }); refetchTasks(); },
+      async () => { await updateRow("campaign_tasks", taskId, { completed: !completed }); refetchTasks(); },
     );
   };
 
   const handleDeleteTask = async (taskId: string) => {
     const task = campaignTasks.find((t: any) => t.id === taskId);
-    await supabase.from("campaign_tasks" as any).delete().eq("id", taskId);
+    await deleteRow("campaign_tasks", taskId);
     refetchTasks();
     if (task) {
       pushAction(
         `Delete task "${task.title}"`,
         async () => {
-          await supabase.from("campaign_tasks" as any).insert({
-            id: task.id, campaign_id: task.campaign_id, user_id: task.user_id,
-            title: task.title, description: task.description || "",
-            status_column: task.status_column, sort_order: task.sort_order, completed: task.completed,
+          const now = new Date().toISOString();
+          await insertRow("campaign_tasks", {
+            id: task.id,
+            campaign_id: task.campaign_id,
+            user_id: task.user_id,
+            title: task.title,
+            description: task.description || "",
+            status_column: task.status_column,
+            sort_order: task.sort_order,
+            completed: task.completed,
+            parent_task_id: task.parent_task_id ?? null,
+            priority: task.priority ?? "medium",
+            due_date: task.due_date ?? null,
+            created_at: task.created_at ?? now,
           });
           refetchTasks();
         },
-        async () => { await supabase.from("campaign_tasks" as any).delete().eq("id", taskId); refetchTasks(); },
+        async () => { await deleteRow("campaign_tasks", taskId); refetchTasks(); },
       );
     }
   };
 
   const handleAddTask = async (column: string) => {
     if (!newTaskTitle.trim()) return;
-    await supabase.from("campaign_tasks" as any).insert({
-      campaign_id: id!, user_id: user!.id, title: newTaskTitle.trim(),
-      status_column: column, sort_order: campaignTasks.filter((t: any) => t.status_column === column).length,
+    const now = new Date().toISOString();
+    await insertRow("campaign_tasks", {
+      campaign_id: id!,
+      user_id: user!.id,
+      title: newTaskTitle.trim(),
+      status_column: column,
+      sort_order: campaignTasks.filter((t: any) => t.status_column === column).length,
+      completed: false,
+      description: "",
+      parent_task_id: null,
+      priority: "medium",
+      due_date: null,
+      created_at: now,
     });
     setNewTaskTitle("");
     setAddingTaskColumn(null);
@@ -477,9 +531,11 @@ export default function CampaignWorkspace() {
 
   const handleUpdateTaskInDialog = async () => {
     if (!viewingTask || !taskEditForm.title.trim()) return;
-    await supabase.from("campaign_tasks" as any).update({
-      title: taskEditForm.title, description: taskEditForm.description, status_column: taskEditForm.status_column,
-    }).eq("id", viewingTask.id);
+    await updateRow("campaign_tasks", viewingTask.id, {
+      title: taskEditForm.title,
+      description: taskEditForm.description,
+      status_column: taskEditForm.status_column,
+    });
     setEditingTaskInDialog(false);
     setViewingTask({ ...viewingTask, ...taskEditForm });
     refetchTasks();
@@ -650,10 +706,19 @@ export default function CampaignWorkspace() {
             queryClient.invalidateQueries({ queryKey: ["campaign-refs", id] });
             toast.success(`Note created: ${action.title}`);
           } else if (action.action === "add_task" && action.title) {
-            await supabase.from("campaign_tasks" as any).insert({
-              campaign_id: id!, user_id: user!.id, title: action.title,
-              description: action.description || "", status_column: action.status_column || "foundation_ip",
+            const now = new Date().toISOString();
+            await insertRow("campaign_tasks", {
+              campaign_id: id!,
+              user_id: user!.id,
+              title: action.title,
+              description: action.description || "",
+              status_column: action.status_column || "foundation_ip",
               sort_order: campaignTasks.filter((t: any) => t.status_column === (action.status_column || "foundation_ip")).length,
+              completed: false,
+              parent_task_id: null,
+              priority: "medium",
+              due_date: null,
+              created_at: now,
             });
             queryClient.invalidateQueries({ queryKey: ["campaign-tasks", id] });
             toast.success(`Task added: ${action.title}`);
@@ -701,7 +766,13 @@ export default function CampaignWorkspace() {
         ...(createdWidgetId ? { widgetId: createdWidgetId, widgetTitle: createdWidgetTitle! } : {}),
         ...(createdLinks.length > 0 ? { links: createdLinks } : {}),
       };
-      setChatHistory([...newHistory, assistantMsg]);
+      const nextAssistant = [...newHistory, assistantMsg];
+      setChatHistory(nextAssistant);
+      await updateRow("campaigns", id!, {
+        assistant_chat_history: nextAssistant,
+        updated_at: new Date().toISOString(),
+      });
+      queryClient.invalidateQueries({ queryKey: ["campaign", id] });
     } catch (e: unknown) {
       const err = e as Error & { code?: string };
       if (err.code === "NO_API_KEY") openGeminiSettings();

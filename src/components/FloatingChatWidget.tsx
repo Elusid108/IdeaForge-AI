@@ -6,6 +6,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 
 type ChatMsg = { role: "user" | "assistant"; content: string; noteId?: string; noteTitle?: string; widgetId?: string; widgetTitle?: string; linkId?: string; linkTitle?: string; links?: { id: string; title: string }[] };
 
+/** Presentational only: parent pages own AI calls (ai-service) and persistence (Google Sheets DAL). */
+
 type WidgetState = "collapsed" | "expanded" | "maximized";
 
 interface FloatingChatWidgetProps {

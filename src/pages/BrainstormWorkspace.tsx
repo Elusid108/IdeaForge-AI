@@ -21,6 +21,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { useAuth } from "@/contexts/AuthContext";
+import { getRows, insertRow, updateRow } from "@/lib/google-sheets-db";
 import { supabase } from "@/lib/localDb";
 import { brainstormChat, generateExecutionStrategy, openGeminiSettings } from "@/services/ai-service";
 import { toast } from "sonner";
@@ -141,13 +142,26 @@ export default function BrainstormWorkspace() {
   const { data: brainstorm, isLoading } = useQuery({
     queryKey: ["brainstorm", id],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("brainstorms")
-        .select("*, ideas(raw_dump, processed_summary, title, key_features, tags, category, created_at)")
-        .eq("id", id!)
-        .single();
-      if (error) throw error;
-      return data;
+      const rows = await getRows("brainstorms");
+      const row = rows.find((r) => r.id === id);
+      if (!row) return null;
+      let ideas: Record<string, unknown> | null = null;
+      if (row.idea_id) {
+        const ideaRows = await getRows("ideas");
+        const ir = ideaRows.find((i) => i.id === row.idea_id);
+        if (ir) {
+          ideas = {
+            raw_dump: ir.raw_dump,
+            processed_summary: ir.processed_summary,
+            title: ir.title,
+            key_features: ir.key_features,
+            tags: ir.tags,
+            category: ir.category,
+            created_at: ir.created_at,
+          };
+        }
+      }
+      return { ...row, ideas };
     },
     enabled: !!id,
   });
@@ -170,14 +184,10 @@ export default function BrainstormWorkspace() {
   const { data: linkedProject } = useQuery({
     queryKey: ["brainstorm-linked-project", id],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("projects")
-        .select("id, name")
-        .eq("brainstorm_id", id!)
-        .is("deleted_at", null)
-        .maybeSingle();
-      if (error) throw error;
-      return data;
+      const rows = await getRows("projects", { brainstorm_id: id! });
+      const row = rows.find((r) => r.deleted_at == null || r.deleted_at === "");
+      if (!row) return null;
+      return { id: row.id as string, name: row.name as string };
     },
     enabled: !!id,
   });
@@ -186,14 +196,10 @@ export default function BrainstormWorkspace() {
   const { data: linkedCampaign } = useQuery({
     queryKey: ["brainstorm-linked-campaign", linkedProject?.id],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("campaigns" as any)
-        .select("id, title")
-        .eq("project_id", linkedProject!.id)
-        .is("deleted_at", null)
-        .maybeSingle();
-      if (error) throw error;
-      return data as any;
+      const rows = await getRows("campaigns", { project_id: linkedProject!.id });
+      const row = rows.find((r) => r.deleted_at == null || r.deleted_at === "");
+      if (!row) return null;
+      return { id: row.id as string, title: row.title as string };
     },
     enabled: !!linkedProject?.id,
   });
@@ -210,26 +216,36 @@ export default function BrainstormWorkspace() {
   const isScrapped = brainstorm?.status === "scrapped";
   const isLocked = isCompleted || isScrapped;
 
-  // Dynamic welcome message for the assistant based on lock state
+  // Load floating assistant history from sheet, or show welcome
   useEffect(() => {
-    if (brainstorm && queryChatHistory.length === 0) {
-      const welcomeMsg: ChatMsg = isLocked
-        ? { role: "assistant", content: "👋 I'm your brainstorm assistant. I can answer questions about this brainstorm's content and help you explore ideas. What would you like to know?" }
-        : { role: "assistant", content: "👋 I'm your brainstorm assistant. I can answer questions, help you dig deeper into ideas, **create research notes**, **add reference links**, and **update the description and bullet breakdown**. What would you like to explore?" };
-      setQueryChatHistory([welcomeMsg]);
+    if (!brainstorm) return;
+    const stored = (brainstorm as { assistant_chat_history?: ChatMsg[] }).assistant_chat_history;
+    if (Array.isArray(stored) && stored.length > 0) {
+      setQueryChatHistory(stored);
+      return;
     }
-  }, [brainstorm, isLocked]);
+    const welcomeMsg: ChatMsg = isLocked
+      ? { role: "assistant", content: "👋 I'm your brainstorm assistant. I can answer questions about this brainstorm's content and help you explore ideas. What would you like to know?" }
+      : { role: "assistant", content: "👋 I'm your brainstorm assistant. I can answer questions, help you dig deeper into ideas, **create research notes**, **add reference links**, and **update the description and bullet breakdown**. What would you like to explore?" };
+    setQueryChatHistory([welcomeMsg]);
+  }, [brainstorm?.id, isLocked]);
 
   // --- Undo/Redo ---
   const handleRevert = useCallback(async (fieldName: string, value: string | null, metadata: any) => {
     if (fieldName === "compiled_description") {
       setDescription(value || "");
-      await supabase.from("brainstorms").update({ compiled_description: value || "" }).eq("id", id!);
+      await updateRow("brainstorms", id!, {
+        compiled_description: value || "",
+        updated_at: new Date().toISOString(),
+      });
       queryClient.invalidateQueries({ queryKey: ["brainstorm", id] });
       toast.info("Undo: description reverted");
     } else if (fieldName === "bullet_breakdown") {
       setBullets(value || "");
-      await supabase.from("brainstorms").update({ bullet_breakdown: value || "" }).eq("id", id!);
+      await updateRow("brainstorms", id!, {
+        bullet_breakdown: value || "",
+        updated_at: new Date().toISOString(),
+      });
       queryClient.invalidateQueries({ queryKey: ["brainstorm", id] });
       toast.info("Undo: bullets reverted");
     } else if (fieldName === "deleted_reference" && metadata) {
@@ -243,12 +259,18 @@ export default function BrainstormWorkspace() {
   const handleReapply = useCallback(async (fieldName: string, value: string | null, metadata: any) => {
     if (fieldName === "compiled_description") {
       setDescription(value || "");
-      await supabase.from("brainstorms").update({ compiled_description: value || "" }).eq("id", id!);
+      await updateRow("brainstorms", id!, {
+        compiled_description: value || "",
+        updated_at: new Date().toISOString(),
+      });
       queryClient.invalidateQueries({ queryKey: ["brainstorm", id] });
       toast.info("Redo: description updated");
     } else if (fieldName === "bullet_breakdown") {
       setBullets(value || "");
-      await supabase.from("brainstorms").update({ bullet_breakdown: value || "" }).eq("id", id!);
+      await updateRow("brainstorms", id!, {
+        bullet_breakdown: value || "",
+        updated_at: new Date().toISOString(),
+      });
       queryClient.invalidateQueries({ queryKey: ["brainstorm", id] });
       toast.info("Redo: bullets updated");
     } else if (fieldName === "deleted_reference" && metadata) {
@@ -322,9 +344,11 @@ export default function BrainstormWorkspace() {
 
   // --- Mutations ---
   const updateBrainstorm = useMutation({
-    mutationFn: async (fields: Record<string, any>) => {
-      const { error } = await supabase.from("brainstorms").update(fields).eq("id", id!);
-      if (error) throw error;
+    mutationFn: async (fields: Record<string, unknown>) => {
+      await updateRow("brainstorms", id!, {
+        ...fields,
+        updated_at: new Date().toISOString(),
+      });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["brainstorm", id] });
@@ -336,14 +360,13 @@ export default function BrainstormWorkspace() {
 
   const deleteBrainstorm = useMutation({
     mutationFn: async () => {
-      const { error } = await supabase
-        .from("brainstorms")
-        .update({ deleted_at: new Date().toISOString() } as any)
-        .eq("id", id!);
-      if (error) throw error;
-      // Set linked idea status to "scrapped"
+      const now = new Date().toISOString();
+      await updateRow("brainstorms", id!, { deleted_at: now, updated_at: now });
       if (brainstorm?.idea_id) {
-        await supabase.from("ideas").update({ status: "scrapped" }).eq("id", brainstorm.idea_id);
+        await updateRow("ideas", String(brainstorm.idea_id), {
+          status: "scrapped",
+          updated_at: now,
+        });
       }
     },
     onSuccess: () => {
@@ -405,25 +428,31 @@ export default function BrainstormWorkspace() {
     mutationFn: async () => {
       const bTags = (brainstorm as any)?.tags || [];
       const bCategory = (brainstorm as any)?.category || null;
-      const { data, error } = await supabase
-        .from("projects")
-        .insert({
-          brainstorm_id: id!,
-          user_id: user!.id,
-          name: brainstorm?.title || "Untitled Project",
-          general_notes: description,
-          category: bCategory,
-          tags: bTags,
-          bullet_breakdown: bullets,
-          compiled_description: description,
-        } as any)
-        .select()
-        .single();
-      if (error) throw error;
+      const now = new Date().toISOString();
+      const projectRow = await insertRow("projects", {
+        brainstorm_id: id!,
+        user_id: user!.id,
+        name: brainstorm?.title || "Untitled Project",
+        general_notes: description,
+        category: bCategory,
+        tags: bTags,
+        bullet_breakdown: bullets,
+        compiled_description: description,
+        chat_history: [],
+        status: "planning",
+        created_at: now,
+        updated_at: now,
+        deleted_at: null,
+        campaign_id: null,
+        execution_strategy: "",
+        github_repo_url: "",
+      });
 
-      await supabase.from("brainstorms").update({ status: "completed" }).eq("id", id!);
+      await updateRow("brainstorms", id!, {
+        status: "completed",
+        updated_at: new Date().toISOString(),
+      });
 
-      // Gather notes from brainstorm references
       const { data: bRefs } = await supabase
         .from("brainstorm_references")
         .select("title, description, type")
@@ -431,7 +460,6 @@ export default function BrainstormWorkspace() {
         .eq("type", "note");
       const notesText = (bRefs || []).map((r: any) => `${r.title}: ${r.description || ""}`).join("\n");
 
-      // Generate execution strategy in background
       generateExecutionStrategy({
         title: brainstorm?.title || "",
         description,
@@ -442,12 +470,15 @@ export default function BrainstormWorkspace() {
       })
         .then(async (res) => {
           if (res?.strategy) {
-            await supabase.from("projects").update({ execution_strategy: res.strategy } as any).eq("id", data.id);
+            await updateRow("projects", projectRow.id as string, {
+              execution_strategy: res.strategy,
+              updated_at: new Date().toISOString(),
+            });
           }
         })
         .catch((err) => console.error("Strategy generation failed:", err));
 
-      return data;
+      return projectRow;
     },
     onSuccess: (data) => {
       toast.success("Promoted to project!");
@@ -483,11 +514,13 @@ export default function BrainstormWorkspace() {
 
   const fetchLinkPreview = async (url: string): Promise<string | null> => {
     try {
-      const { data, error } = await supabase.functions.invoke("fetch-link-preview", {
-        body: { url },
-      });
-      if (error) return null;
-      return data?.thumbnail_url || null;
+      const u = encodeURIComponent(url);
+      const res = await fetch(`https://api.microlink.io/?url=${u}`);
+      if (!res.ok) return null;
+      const data = (await res.json()) as {
+        data?: { image?: { url?: string }; logo?: { url?: string } };
+      };
+      return data?.data?.image?.url || data?.data?.logo?.url || null;
     } catch {
       return null;
     }
@@ -633,7 +666,10 @@ export default function BrainstormWorkspace() {
         setCurrentQuestion(next_question);
         setAnswer("");
 
-        await supabase.from("brainstorms").update({ chat_history: finalHistory }).eq("id", id!);
+        await updateRow("brainstorms", id!, {
+          chat_history: finalHistory,
+          updated_at: new Date().toISOString(),
+        });
         queryClient.invalidateQueries({ queryKey: ["brainstorm", id] });
       } else {
         setDescription(updated_description);
@@ -659,7 +695,10 @@ export default function BrainstormWorkspace() {
           updateFields.category = data.updated_category;
         }
 
-        await supabase.from("brainstorms").update(updateFields).eq("id", id!);
+        await updateRow("brainstorms", id!, {
+          ...updateFields,
+          updated_at: new Date().toISOString(),
+        });
         queryClient.invalidateQueries({ queryKey: ["brainstorm", id] });
       }
     } catch (e: unknown) {
@@ -724,14 +763,20 @@ export default function BrainstormWorkspace() {
             const oldVal = description;
             setDescription(action.description);
             pushEntry("compiled_description", oldVal, action.description);
-            await supabase.from("brainstorms").update({ compiled_description: action.description }).eq("id", id!);
+            await updateRow("brainstorms", id!, {
+              compiled_description: action.description,
+              updated_at: new Date().toISOString(),
+            });
             queryClient.invalidateQueries({ queryKey: ["brainstorm", id] });
             toast.success("Description updated");
           } else if (action.action === "update_bullets" && action.bullets) {
             const oldVal = bullets;
             setBullets(action.bullets);
             pushEntry("bullet_breakdown", oldVal, action.bullets);
-            await supabase.from("brainstorms").update({ bullet_breakdown: action.bullets }).eq("id", id!);
+            await updateRow("brainstorms", id!, {
+              bullet_breakdown: action.bullets,
+              updated_at: new Date().toISOString(),
+            });
             queryClient.invalidateQueries({ queryKey: ["brainstorm", id] });
             toast.success("Bullet breakdown updated");
           } else if (action.action === "create_link" && action.title && action.url) {
@@ -759,7 +804,13 @@ export default function BrainstormWorkspace() {
         ...(createdNoteId ? { noteId: createdNoteId, noteTitle: createdNoteTitle! } : {}),
         ...(createdLinks.length > 0 ? { links: createdLinks } : {}),
       };
-      setQueryChatHistory([...newHistory, assistantMsg]);
+      const nextAssistant = [...newHistory, assistantMsg];
+      setQueryChatHistory(nextAssistant);
+      await updateRow("brainstorms", id!, {
+        assistant_chat_history: nextAssistant,
+        updated_at: new Date().toISOString(),
+      });
+      queryClient.invalidateQueries({ queryKey: ["brainstorm", id] });
     } catch (e: unknown) {
       const err = e as Error & { code?: string };
       if (err.code === "NO_API_KEY") openGeminiSettings();
