@@ -33,6 +33,7 @@ import ReactMarkdown from "react-markdown";
 import { markdownComponents } from "@/lib/markdownComponents";
 import { useUndoRedo } from "@/hooks/useUndoRedo";
 import { format } from "date-fns";
+import { keyFeaturesToHtml, normalizeIdeaTags, normalizeIdeaText } from "@/lib/ideaText";
 
 type RefType = "link" | "image" | "video" | "note";
 type ChatMsg = { role: "user" | "assistant"; content: string; noteId?: string; noteTitle?: string; linkId?: string; linkTitle?: string; links?: { id: string; title: string }[] };
@@ -76,6 +77,10 @@ const BRAINSTORM_STATUS_OPTIONS = [
   { value: "backburner", label: "Backburner", className: "bg-amber-500/20 text-amber-400 border-amber-500/30" },
   { value: "scrapped", label: "Scrapped", className: "bg-zinc-500/20 text-zinc-400 border-zinc-500/30" },
 ];
+
+function noteDescriptionPlainText(desc: unknown): string {
+  return normalizeIdeaText(desc).replace(/<[^>]*>/g, "").trim();
+}
 
 export default function BrainstormWorkspace() {
   const { id } = useParams<{ id: string }>();
@@ -295,7 +300,10 @@ export default function BrainstormWorkspace() {
       if (history.length > 0) {
         const lastAssistant = [...history].reverse().find(m => m.role === "assistant");
         if (lastAssistant) {
-          const match = lastAssistant.content.match(/Next question:\s*(.+)/);
+          const content = typeof lastAssistant.content === "string"
+            ? lastAssistant.content
+            : String(lastAssistant.content ?? "");
+          const match = content.match(/Next question:\s*(.+)/);
           if (match) {
             setCurrentQuestion(match[1].trim());
             return;
@@ -313,11 +321,11 @@ export default function BrainstormWorkspace() {
     const otherRefs = references.filter((r: any) => r.type !== "note");
     return {
       title: brainstorm?.title || "",
-      idea_raw: (brainstorm as any)?.ideas?.raw_dump || "",
-      idea_summary: (brainstorm as any)?.ideas?.processed_summary || "",
-      notes: notes.map((r: any) => `${r.title}: ${r.description || ""}`).join("\n"),
-      references: otherRefs.map((r: any) => `[${r.type}] ${r.title}: ${r.description || r.url}`).join("\n"),
-      tags: (brainstorm as any)?.tags || [],
+      idea_raw: normalizeIdeaText((brainstorm as any)?.ideas?.raw_dump),
+      idea_summary: normalizeIdeaText((brainstorm as any)?.ideas?.processed_summary),
+      notes: notes.map((r: any) => `${r.title}: ${normalizeIdeaText(r.description)}`).join("\n"),
+      references: otherRefs.map((r: any) => `[${r.type}] ${r.title}: ${normalizeIdeaText(r.description || r.url)}`).join("\n"),
+      tags: normalizeIdeaTags((brainstorm as any)?.tags),
       category: (brainstorm as any)?.category || "",
     };
   };
@@ -527,8 +535,9 @@ export default function BrainstormWorkspace() {
   };
 
   const ensureHttps = (url: string) => {
-    if (!url) return url;
-    return url.match(/^https?:\/\//) ? url : `https://${url}`;
+    const u = String(url ?? "").trim();
+    if (!u) return u;
+    return u.match(/^https?:\/\//) ? u : `https://${u}`;
   };
 
   const handleAddRef = async () => {
@@ -577,7 +586,9 @@ export default function BrainstormWorkspace() {
 
   const handleRefClick = (ref: any) => {
     if (ref.type === "link" && ref.url) {
-      const url = ref.url.match(/^https?:\/\//) ? ref.url : `https://${ref.url}`;
+      const u = String(ref.url ?? "");
+      if (!u) return;
+      const url = u.match(/^https?:\/\//) ? u : `https://${u}`;
       window.open(url, "_blank", "noopener,noreferrer");
     } else if (ref.type === "note" || ref.type === "image" || ref.type === "video") {
       setViewingRef(ref);
@@ -780,12 +791,13 @@ export default function BrainstormWorkspace() {
             queryClient.invalidateQueries({ queryKey: ["brainstorm", id] });
             toast.success("Bullet breakdown updated");
           } else if (action.action === "create_link" && action.title && action.url) {
+            const rawUrl = String(action.url);
             const { data: linkData } = await supabase.from("brainstorm_references").insert({
               brainstorm_id: id!,
               user_id: user!.id,
               type: "link",
               title: action.title,
-              url: action.url.match(/^https?:\/\//) ? action.url : `https://${action.url}`,
+              url: rawUrl.match(/^https?:\/\//) ? rawUrl : `https://${rawUrl}`,
               description: action.description || "",
               sort_order: references.length,
             }).select("id").single();
@@ -846,15 +858,19 @@ export default function BrainstormWorkspace() {
   }
 
   const linkedIdea = (brainstorm as any)?.ideas;
+  const linkedIdeaTags = linkedIdea ? normalizeIdeaTags(linkedIdea.tags) : [];
   const brainstormCategory = (brainstorm as any)?.category || linkedIdea?.category;
-  const brainstormTags: string[] = (brainstorm as any)?.tags || linkedIdea?.tags || [];
+  const brainstormTags = normalizeIdeaTags((brainstorm as any)?.tags ?? linkedIdea?.tags);
   const linkedCategoryClass = linkedIdea?.category ? CATEGORY_COLORS[linkedIdea.category] || "bg-secondary text-secondary-foreground" : "";
   const categoryBadgeClass = brainstormCategory ? CATEGORY_COLORS[brainstormCategory] || "bg-secondary text-secondary-foreground" : "";
 
   const getRefThumbnail = (ref: any): string | null => {
     if (ref.thumbnail_url) return ref.thumbnail_url;
-    if (ref.type === "image" && ref.url) return ref.url;
-    if (ref.type === "video" && ref.url) return getVideoThumbnail(ref.url);
+    if (ref.type === "image" && ref.url) return String(ref.url ?? "");
+    if (ref.type === "video" && ref.url) {
+      const u = String(ref.url ?? "");
+      return u ? getVideoThumbnail(u) : null;
+    }
     return null;
   };
 
@@ -1138,7 +1154,7 @@ export default function BrainstormWorkspace() {
                                       <Icon className={`h-4 w-4 ${iconColor} shrink-0`} />
                                       <span className="text-sm font-medium truncate flex-1">{ref.title}</span>
                                       {ref.description && (
-                                        <span className="text-xs text-muted-foreground truncate max-w-[200px] hidden sm:inline">{ref.type === "note" ? ref.description.replace(/<[^>]*>/g, "").trim() : ref.description}</span>
+                                        <span className="text-xs text-muted-foreground truncate max-w-[200px] hidden sm:inline">{ref.type === "note" ? noteDescriptionPlainText(ref.description) : normalizeIdeaText(ref.description)}</span>
                                       )}
                                       {!isLocked && (
                                         <div className="flex items-center gap-0.5 shrink-0">
@@ -1157,7 +1173,7 @@ export default function BrainstormWorkspace() {
                                       <Icon className={`h-4 w-4 ${iconColor} shrink-0 mt-0.5`} />
                                       <div className="min-w-0">
                                         <p className="text-sm font-medium">{ref.title}</p>
-                                        {ref.description && <p className="text-xs text-muted-foreground mt-1 line-clamp-4">{ref.type === "note" ? ref.description.replace(/<[^>]*>/g, "").trim() : ref.description}</p>}
+                                        {ref.description && <p className="text-xs text-muted-foreground mt-1 line-clamp-4">{ref.type === "note" ? noteDescriptionPlainText(ref.description) : normalizeIdeaText(ref.description)}</p>}
                                         {ref.type === "link" && ref.url && <p className="text-xs text-blue-400 truncate mt-1">{ref.url}</p>}
                                       </div>
                                     </div>
@@ -1187,7 +1203,7 @@ export default function BrainstormWorkspace() {
                                         <div className="flex-1 min-w-0">
                                           <p className="text-sm font-medium truncate">{ref.title}</p>
                                           {ref.description && (
-                                            <p className="text-xs text-muted-foreground line-clamp-2">{ref.type === "note" ? ref.description.replace(/<[^>]*>/g, "").trim() : ref.description}</p>
+                                            <p className="text-xs text-muted-foreground line-clamp-2">{ref.type === "note" ? noteDescriptionPlainText(ref.description) : normalizeIdeaText(ref.description)}</p>
                                           )}
                                         </div>
                                         {!isLocked && (
@@ -1209,7 +1225,7 @@ export default function BrainstormWorkspace() {
                                     <Icon className={`h-4 w-4 ${iconColor} shrink-0 mt-0.5`} />
                                     <div className="min-w-0">
                                       <p className="text-sm font-medium">{ref.title}</p>
-                                      {ref.description && <p className="text-xs text-muted-foreground mt-1 line-clamp-4">{ref.type === "note" ? ref.description.replace(/<[^>]*>/g, "").trim() : ref.description}</p>}
+                                      {ref.description && <p className="text-xs text-muted-foreground mt-1 line-clamp-4">{ref.type === "note" ? noteDescriptionPlainText(ref.description) : normalizeIdeaText(ref.description)}</p>}
                                       {ref.type === "link" && ref.url && <p className="text-xs text-blue-400 truncate mt-1">{ref.url}</p>}
                                     </div>
                                   </div>
@@ -1270,7 +1286,7 @@ export default function BrainstormWorkspace() {
         <Dialog open={showLinkedIdea} onOpenChange={setShowLinkedIdea}>
           <DialogContent className="sm:max-w-2xl max-h-[85vh] overflow-y-auto">
             <DialogHeader>
-              <DialogTitle>{linkedIdea.title || "Linked Idea"}</DialogTitle>
+              <DialogTitle>{normalizeIdeaText(linkedIdea.title).trim() || "Linked Idea"}</DialogTitle>
               <DialogDescription className="sr-only">View linked idea details</DialogDescription>
             </DialogHeader>
 
@@ -1286,29 +1302,29 @@ export default function BrainstormWorkspace() {
               <div>
                 <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Raw Dump</p>
                 <div className="rounded-lg bg-muted/50 p-3 text-sm text-muted-foreground whitespace-pre-wrap">
-                  {linkedIdea.raw_dump}
+                  {normalizeIdeaText(linkedIdea.raw_dump)}
                 </div>
               </div>
 
-              {linkedIdea.processed_summary && (
+              {normalizeIdeaText(linkedIdea.processed_summary).trim() ? (
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Summary</p>
-                  <p className="text-sm leading-relaxed">{linkedIdea.processed_summary}</p>
+                  <p className="text-sm leading-relaxed">{normalizeIdeaText(linkedIdea.processed_summary)}</p>
                 </div>
-              )}
+              ) : null}
 
-              {linkedIdea.key_features && (
+              {normalizeIdeaText(linkedIdea.key_features).trim() ? (
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Key Features</p>
                   <div className="text-sm text-muted-foreground">
-                    <div dangerouslySetInnerHTML={{ __html: linkedIdea.key_features.replace(/^- /gm, "• ").replace(/\n/g, "<br/>") }} />
+                    <div dangerouslySetInnerHTML={{ __html: keyFeaturesToHtml(linkedIdea.key_features) }} />
                   </div>
                 </div>
-              )}
+              ) : null}
 
-              {linkedIdea.tags && linkedIdea.tags.length > 0 && (
+              {linkedIdeaTags.length > 0 && (
                 <div className="flex flex-wrap gap-1">
-                  {linkedIdea.tags.map((tag: string) => (
+                  {linkedIdeaTags.map((tag: string) => (
                     <Badge key={tag} variant="secondary" className="text-xs">{tag}</Badge>
                   ))}
                 </div>
@@ -1464,7 +1480,9 @@ export default function BrainstormWorkspace() {
                       onClick={() => {
                         const link = references.find((r: any) => r.id === msg.linkId);
                         if (link) {
-                          const url = link.url?.match(/^https?:\/\//) ? link.url : `https://${link.url}`;
+                          const u = String(link.url ?? "");
+                          if (!u) return;
+                          const url = u.match(/^https?:\/\//) ? u : `https://${u}`;
                           window.open(url, "_blank", "noopener,noreferrer");
                         }
                       }}
@@ -1482,7 +1500,9 @@ export default function BrainstormWorkspace() {
                           onClick={() => {
                             const ref = references.find((r: any) => r.id === link.id);
                             if (ref) {
-                              const url = ref.url?.match(/^https?:\/\//) ? ref.url : `https://${ref.url}`;
+                              const u = String(ref.url ?? "");
+                              if (!u) return;
+                              const url = u.match(/^https?:\/\//) ? u : `https://${u}`;
                               window.open(url, "_blank", "noopener,noreferrer");
                             }
                           }}

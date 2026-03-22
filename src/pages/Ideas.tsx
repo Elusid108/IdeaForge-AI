@@ -16,6 +16,7 @@ import { openGeminiSettings, processIdeaClient } from "@/services/ai-service";
 import { toast } from "sonner";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
+import { keyFeaturesToHtml, normalizeIdeaTags, normalizeIdeaText } from "@/lib/ideaText";
 
 const CATEGORY_COLORS: Record<string, string> = {
   "Product": "bg-blue-500/20 text-blue-400 border-blue-500/30",
@@ -27,29 +28,6 @@ const CATEGORY_COLORS: Record<string, string> = {
   "Software/App": "bg-violet-500/20 text-violet-400 border-violet-500/30",
   "Environment/Space": "bg-teal-500/20 text-teal-400 border-teal-500/30",
 };
-
-function normalizeIdeaText(value: unknown): string {
-  if (value == null) return "";
-  if (typeof value === "string") return value;
-  if (Array.isArray(value)) return value.map(String).join("\n");
-  return String(value);
-}
-
-function normalizeIdeaTags(value: unknown): string[] {
-  if (Array.isArray(value)) return value.map(String).filter(Boolean);
-  if (typeof value === "string") {
-    return value
-      .split(",")
-      .map((t) => t.trim())
-      .filter(Boolean);
-  }
-  return [];
-}
-
-function keyFeaturesToHtml(value: unknown): string {
-  const s = normalizeIdeaText(value).trim();
-  return s.replace(/^- /gm, "• ").replace(/\n/g, "<br/>");
-}
 
 function IdeaCard({ idea, onClick }: { idea: any; onClick: () => void }) {
   const isProcessing = idea.status === "processing";
