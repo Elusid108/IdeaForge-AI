@@ -34,6 +34,9 @@ import { markdownComponents } from "@/lib/markdownComponents";
 import { useUndoRedo } from "@/hooks/useUndoRedo";
 import { format } from "date-fns";
 import { keyFeaturesToHtml, normalizeIdeaTags, normalizeIdeaText } from "@/lib/ideaText";
+import GoogleAPI from "@/lib/google-api";
+import DriveImage from "@/components/common/DriveImage";
+import { formatDriveReferenceUrl, parseDriveFileIdFromRefUrl } from "@/lib/driveReference";
 
 type RefType = "link" | "image" | "video" | "note";
 type ChatMsg = { role: "user" | "assistant"; content: string; noteId?: string; noteTitle?: string; linkId?: string; linkTitle?: string; links?: { id: string; title: string }[] };
@@ -542,22 +545,19 @@ export default function BrainstormWorkspace() {
 
   const handleAddRef = async () => {
     if (addRefType === "image" && refFile) {
-      const path = `${user!.id}/${id}/${Date.now()}-${refFile.name}`;
-      const { error: uploadError } = await supabase.storage
-        .from("brainstorm-references")
-        .upload(path, refFile);
-      if (uploadError) {
-        toast.error("Upload failed: " + uploadError.message);
-        return;
+      try {
+        const fileId = await GoogleAPI.uploadFileToDrive(refFile, undefined);
+        const driveUrl = formatDriveReferenceUrl(fileId);
+        addReference.mutate({
+          type: "image",
+          title: refForm.title || refFile.name,
+          url: driveUrl,
+          description: refForm.description,
+          thumbnail_url: driveUrl,
+        });
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "Upload failed");
       }
-      const { data: urlData } = supabase.storage.from("brainstorm-references").getPublicUrl(path);
-      addReference.mutate({
-        type: "image",
-        title: refForm.title || refFile.name,
-        url: urlData.publicUrl,
-        description: refForm.description,
-        thumbnail_url: urlData.publicUrl,
-      });
     } else if (addRefType === "link" || addRefType === "video") {
       const url = addRefType === "link" ? ensureHttps(refForm.url) : refForm.url;
       let thumbnail_url: string | null = null;
@@ -1142,6 +1142,7 @@ export default function BrainstormWorkspace() {
                             const Icon = REF_ICONS[ref.type] || StickyNote;
                             const iconColor = REF_ICON_COLORS[ref.type] || "text-muted-foreground";
                             const thumbnail = getRefThumbnail(ref);
+                            const thumbDriveId = thumbnail ? parseDriveFileIdFromRefUrl(thumbnail) : null;
 
                             if (refViewMode === "list") {
                               return (
@@ -1193,7 +1194,11 @@ export default function BrainstormWorkspace() {
                                       <div className="flex items-start gap-3">
                                         {thumbnail ? (
                                           <div className="h-12 w-16 rounded overflow-hidden shrink-0 bg-muted">
-                                            <img src={thumbnail} alt="" className="h-full w-full object-cover" />
+                                            {thumbDriveId ? (
+                                              <DriveImage fileId={thumbDriveId} alt="" className="h-full w-full object-cover" />
+                                            ) : (
+                                              <img src={thumbnail} alt="" className="h-full w-full object-cover" />
+                                            )}
                                           </div>
                                         ) : (
                                           <div className="h-12 w-16 rounded bg-muted/50 flex items-center justify-center shrink-0">

@@ -2,6 +2,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ui/resizable";
 import { addTargetBlankToHtml } from "@/lib/markdownComponents";
 import { parseWidgetData } from "@/lib/widgetUtils";
+import DriveImage from "@/components/common/DriveImage";
+import { parseDriveFileIdFromRefUrl } from "@/lib/driveReference";
 
 interface Reference {
   id: string;
@@ -54,6 +56,7 @@ export default function ReferenceViewer({ reference, open, onOpenChange }: Refer
   }
 
   if (reference.type === "image") {
+    const driveFileId = parseDriveFileIdFromRefUrl(reference.url);
     return (
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent className="sm:max-w-4xl p-0 bg-black/95 border-none [&>button]:text-white [&>button]:hover:opacity-100 [&>button]:top-2 [&>button]:right-2 [&>button]:z-10">
@@ -63,11 +66,19 @@ export default function ReferenceViewer({ reference, open, onOpenChange }: Refer
           </DialogHeader>
           <div className="pt-10 pb-4 px-4">
             <div className="flex items-center justify-center min-h-[50vh]">
-              <img
-                src={reference.url || ""}
-                alt={reference.title}
-                className="max-w-full max-h-[80vh] object-contain"
-              />
+              {driveFileId ? (
+                <DriveImage
+                  fileId={driveFileId}
+                  alt={reference.title}
+                  className="max-w-full max-h-[80vh] object-contain"
+                />
+              ) : (
+                <img
+                  src={reference.url || ""}
+                  alt={reference.title}
+                  className="max-w-full max-h-[80vh] object-contain"
+                />
+              )}
             </div>
             {reference.description && (
               <p className="text-sm text-gray-400 text-center mt-3 px-4">{reference.description}</p>

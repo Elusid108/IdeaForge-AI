@@ -944,44 +944,82 @@ const deleteDriveFolder = async (folderId) => {
     }
 };
 
-// Upload file to Drive
-const uploadFileToDrive = async (file, folderId, name) => {
+/**
+ * Multipart upload (metadata + binary) per Drive v3 multipart spec.
+ * @param file File to upload
+ * @param parentFolderId Optional Drive folder id; omitted uploads to My Drive root
+ * @returns New file id
+ */
+const uploadFileToDrive = async (file, parentFolderId) => {
     try {
         await ensureAuthenticated();
 
         const metadata = {
-            name: name,
-            parents: folderId ? [folderId] : []
+            name: file.name,
+            ...(parentFolderId ? { parents: [parentFolderId] } : {}),
         };
 
-        const form = new FormData();
-        form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
-        form.append('file', file);
+        const boundary =
+            'ideaforge_' +
+            Date.now().toString(36) +
+            '_' +
+            Math.random().toString(36).slice(2, 14);
+        const metaJson = JSON.stringify(metadata);
+        const mediaType = file.type || 'application/octet-stream';
 
-        const response = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${accessToken}`
+        const body = new Blob(
+            [
+                `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n`,
+                metaJson,
+                `\r\n--${boundary}\r\nContent-Type: ${mediaType}\r\n\r\n`,
+                file,
+                `\r\n--${boundary}--\r\n`,
+            ],
+            { type: `multipart/related; boundary=${boundary}` },
+        );
+
+        const response = await fetch(
+            'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id',
+            {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${accessToken}`,
+                    'Content-Type': `multipart/related; boundary=${boundary}`,
+                },
+                body,
             },
-            body: form
-        });
+        );
 
         if (!response.ok) {
-            throw new Error(`Failed to upload file: ${response.statusText}`);
+            let detail = response.statusText;
+            try {
+                const errJson = await response.json();
+                if (errJson?.error?.message) {
+                    detail = errJson.error.message;
+                }
+            } catch {
+                try {
+                    const t = await response.text();
+                    if (t) {
+                        detail = t.slice(0, 300);
+                    }
+                } catch {
+                    /* ignore */
+                }
+            }
+            throw new Error(`Failed to upload file: ${detail}`);
         }
 
         const result = await response.json();
+        if (!result?.id) {
+            throw new Error('Failed to upload file: no file id in response');
+        }
 
-        // Get webViewLink
-        const fileResponse = await gapi.client.drive.files.get({
-            fileId: result.id,
-            fields: 'id, name, webViewLink, mimeType'
-        });
-
-        return fileResponse.result;
+        return result.id;
     } catch (error) {
         console.error('Error uploading file:', error);
-        if (error.status === 401 || error.message.includes('Authentication')) {
+        const msg = typeof error?.message === 'string' ? error.message : String(error);
+        if (error?.status === 401 || msg.includes('Authentication')) {
             await handleTokenExpiration();
             throw new Error('Authentication expired');
         }

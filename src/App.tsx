@@ -7,7 +7,6 @@ import { AuthProvider } from "@/contexts/AuthContext";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import AppLayout from "@/components/AppLayout";
 import LoginPage from "@/pages/Login";
-import SignupPage from "@/pages/Signup";
 import IdeasPage from "@/pages/Ideas";
 import BrainstormsPage from "@/pages/Brainstorms";
 import BrainstormWorkspace from "@/pages/BrainstormWorkspace";
@@ -29,7 +28,7 @@ const App = () => (
         <AuthProvider>
           <Routes>
             <Route path="/login" element={<LoginPage />} />
-            <Route path="/signup" element={<SignupPage />} />
+            <Route path="/signup" element={<Navigate to="/login" replace />} />
             <Route
               path="/"
               element={

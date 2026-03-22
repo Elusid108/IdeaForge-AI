@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "sonner";
 import IdeaForgeLogo from "@/components/IdeaForgeLogo";
 import { useAuth } from "@/contexts/AuthContext";
@@ -40,14 +40,6 @@ export default function LoginPage() {
             {loading ? "Signing in…" : "Continue with Google"}
           </Button>
         </CardContent>
-        <CardFooter className="flex flex-col gap-3">
-          <p className="text-center text-sm text-muted-foreground">
-            Don&apos;t have an account?{" "}
-            <Link to="/signup" className="text-primary hover:underline">
-              Sign up
-            </Link>
-          </p>
-        </CardFooter>
       </Card>
     </div>
   );

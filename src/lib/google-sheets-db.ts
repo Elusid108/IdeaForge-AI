@@ -6,9 +6,9 @@
 import {
   getAccessToken,
   handleTokenExpiration,
+  loadGapi,
 } from "@/lib/google-api";
 
-const DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files";
 const SHEETS_API = "https://sheets.googleapis.com/v4/spreadsheets";
 
 export const DB_SPREADSHEET_TITLE = "IdeaForge_DB";
@@ -693,97 +693,128 @@ export async function ensureDatabaseSchema(): Promise<void> {
   await migrateCampaignAssistantChatColumn(spreadsheetId);
 }
 
-/**
- * Ensures a spreadsheet named {@link DB_SPREADSHEET_TITLE} exists and has core worksheets + headers.
- */
-export async function initDatabaseSheet(): Promise<{ spreadsheetId: string }> {
-  const q = encodeURIComponent(
-    `name='${DB_SPREADSHEET_TITLE.replace(/'/g, "\\'")}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`,
+function driveApiErrorMessage(error: unknown): string {
+  const e = error as {
+    result?: { error?: { message?: string } };
+    message?: string;
+  };
+  return e?.result?.error?.message ?? e?.message ?? String(error);
+}
+
+async function driveListAppDataSpreadsheet(
+  allowRetry: boolean,
+): Promise<{ id: string; name: string }[]> {
+  const q = `name='${DB_SPREADSHEET_TITLE.replace(/'/g, "\\'")}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`;
+  try {
+    const response = await gapi.client.drive.files.list({
+      q,
+      spaces: "appDataFolder",
+      fields: "files(id,name)",
+      pageSize: 10,
+    });
+    const files = response.result.files ?? [];
+    return files.filter((f): f is { id: string; name: string } => !!f.id);
+  } catch (error: unknown) {
+    const err = error as { status?: number };
+    if ((err.status === 401 || err.status === 403) && allowRetry) {
+      await handleTokenExpiration();
+      const token = getAccessToken();
+      if (!token) throw new Error("Not authenticated: no access token");
+      gapi.client.setToken({ access_token: token });
+      await new Promise((r) => setTimeout(r, 400));
+      return driveListAppDataSpreadsheet(false);
+    }
+    throw new Error(`Drive files.list failed: ${driveApiErrorMessage(error)}`);
+  }
+}
+
+async function driveCreateAppDataSpreadsheet(allowRetry: boolean): Promise<string> {
+  try {
+    const response = await gapi.client.drive.files.create({
+      resource: {
+        name: DB_SPREADSHEET_TITLE,
+        mimeType: "application/vnd.google-apps.spreadsheet",
+        parents: ["appDataFolder"],
+      },
+      fields: "id",
+    });
+    const id = response.result.id;
+    if (!id) throw new Error("Drive files.create returned no id");
+    return id;
+  } catch (error: unknown) {
+    const err = error as { status?: number };
+    if ((err.status === 401 || err.status === 403) && allowRetry) {
+      await handleTokenExpiration();
+      const token = getAccessToken();
+      if (!token) throw new Error("Not authenticated: no access token");
+      gapi.client.setToken({ access_token: token });
+      await new Promise((r) => setTimeout(r, 400));
+      return driveCreateAppDataSpreadsheet(false);
+    }
+    throw new Error(`Drive files.create failed: ${driveApiErrorMessage(error)}`);
+  }
+}
+
+/** Removes the default tab left by Drive `files.create` after core worksheets exist. */
+async function deleteWorksheetByTitleIfExists(
+  spreadsheetId: string,
+  title: string,
+): Promise<void> {
+  const url = `${SHEETS_API}/${encodeURIComponent(spreadsheetId)}?fields=sheets(properties(sheetId%2Ctitle))`;
+  const res = await authorizedFetch(url, { method: "GET" }, true);
+  if (!res.ok) return;
+  const data = (await res.json()) as {
+    sheets?: { properties?: { sheetId?: number; title?: string } }[];
+  };
+  const sheet = (data.sheets ?? []).find((s) => s.properties?.title === title);
+  const sheetId = sheet?.properties?.sheetId;
+  if (sheetId === undefined) return;
+
+  const batchUrl = `${SHEETS_API}/${encodeURIComponent(spreadsheetId)}:batchUpdate`;
+  const batchRes = await authorizedFetch(
+    batchUrl,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        requests: [{ deleteSheet: { sheetId } }],
+      }),
+    },
+    true,
   );
-  const listUrl = `${DRIVE_FILES_URL}?q=${q}&fields=${encodeURIComponent("files(id,name)")}&pageSize=10&spaces=drive`;
-  const listRes = await authorizedFetch(listUrl, { method: "GET" }, true);
-  if (!listRes.ok) {
+  if (!batchRes.ok) {
     throw new Error(
-      `Drive files.list failed: ${listRes.status} ${await parseGoogleError(listRes)}`,
+      `Failed to delete worksheet ${title}: ${batchRes.status} ${await parseGoogleError(batchRes)}`,
     );
   }
-  const listJson = (await listRes.json()) as { files?: { id: string; name: string }[] };
-  const files = listJson.files ?? [];
+  sheetIdCache.delete(spreadsheetId);
+}
+
+/**
+ * Ensures a spreadsheet named {@link DB_SPREADSHEET_TITLE} exists in the Drive App Data folder and has core worksheets + headers.
+ */
+export async function initDatabaseSheet(): Promise<{ spreadsheetId: string }> {
+  await loadGapi();
+  const token = getAccessToken();
+  if (!token) {
+    throw new Error("Not authenticated: no access token");
+  }
+  gapi.client.setToken({ access_token: token });
+
+  const files = await driveListAppDataSpreadsheet(true);
   if (files.length > 1) {
     console.warn(
       `Multiple spreadsheets named ${DB_SPREADSHEET_TITLE}; using the first (${files[0].id})`,
     );
   }
 
-  let spreadsheetId: string;
+  const spreadsheetId =
+    files.length > 0 ? files[0].id : await driveCreateAppDataSpreadsheet(true);
 
-  if (files.length > 0) {
-    spreadsheetId = files[0].id;
-  } else {
-    const createBody = {
-      properties: { title: DB_SPREADSHEET_TITLE },
-      sheets: (
-        [
-          "ideas",
-          "projects",
-          "brainstorms",
-          "campaigns",
-          "project_tasks",
-          "campaign_tasks",
-          "gotchas",
-        ] as CoreTableName[]
-      ).map((title) => ({
-        properties: { title },
-      })),
-    };
-    const createRes = await authorizedFetch(
-      SHEETS_API,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(createBody),
-      },
-      true,
-    );
-    if (!createRes.ok) {
-      throw new Error(
-        `Failed to create spreadsheet: ${createRes.status} ${await parseGoogleError(createRes)}`,
-      );
-    }
-    const created = (await createRes.json()) as { spreadsheetId: string };
-    spreadsheetId = created.spreadsheetId;
-
-    const data = (
-      Object.entries(TABLE_HEADERS) as [CoreTableName, readonly string[]][]
-    ).map(([name, headers]) => ({
-      range: `${escapeSheetName(name)}!A1:${colIndexToLetter(headers.length - 1)}1`,
-      values: [headers.slice()],
-    }));
-
-    const batchRes = await authorizedFetch(
-      `${SHEETS_API}/${encodeURIComponent(spreadsheetId)}/values:batchUpdate`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          valueInputOption: "USER_ENTERED",
-          data,
-        }),
-      },
-      true,
-    );
-    if (!batchRes.ok) {
-      throw new Error(
-        `Failed to write headers: ${batchRes.status} ${await parseGoogleError(batchRes)}`,
-      );
-    }
-  }
-
-  cachedSpreadsheetId = spreadsheetId;
-  localStorage.setItem(STORAGE_KEY_SPREADSHEET_ID, spreadsheetId);
-  sheetIdCache.delete(spreadsheetId);
+  setSpreadsheetId(spreadsheetId);
 
   await ensureDatabaseSchema();
+  await deleteWorksheetByTitleIfExists(spreadsheetId, "Sheet1");
 
   return { spreadsheetId };
 }

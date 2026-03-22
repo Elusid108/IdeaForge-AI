@@ -119,8 +119,10 @@ export interface BrainstormReference {
   user_id: string;
   type: string;
   title: string;
+  /** Public https URL, or `gdrive:<fileId>` for private Google Drive assets */
   url?: string | null;
   description?: string | null;
+  /** Same as `url` for Drive-backed images, or external thumbnail URL */
   thumbnail_url?: string | null;
   sort_order: number;
   created_at: string;
