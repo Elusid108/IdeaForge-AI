@@ -6,6 +6,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Textarea } from "@/components/ui/textarea";
 import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/lib/localDb";
+import { openGeminiSettings, processIdeaClient } from "@/services/ai-service";
 import { toast } from "sonner";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
@@ -43,10 +44,13 @@ export default function MobileDumpIdea() {
       setOpen(false);
       setRawDump("");
       toast.success("Idea captured! AI is processing…");
-      supabase.functions
-        .invoke("process-idea", { body: { idea_id: data.id, raw_dump: data.raw_dump } })
-        .then(({ error }) => {
-          if (error) toast.error("AI processing failed — you can retry later.");
+      void processIdeaClient(supabase, { idea_id: data.id, raw_dump: data.raw_dump })
+        .catch((err: unknown) => {
+          const e = err as Error & { code?: string };
+          if (e.code === "NO_API_KEY") openGeminiSettings();
+          toast.error("AI processing failed — add a valid API key in Settings or try again.");
+        })
+        .finally(() => {
           queryClient.invalidateQueries({ queryKey: ["ideas"] });
         });
       navigate("/ideas");

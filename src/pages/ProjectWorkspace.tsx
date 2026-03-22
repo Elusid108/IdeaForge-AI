@@ -25,6 +25,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/lib/localDb";
+import { gotchaChat, openGeminiSettings, projectChat } from "@/services/ai-service";
 import { toast } from "sonner";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import EditableMarkdown from "@/components/EditableMarkdown";
@@ -789,21 +790,18 @@ export default function ProjectWorkspace() {
           return `${r.title}: ${wd.summary || "(no summary)"} [code length: ${wd.code.length} chars]`;
         }).join("\n");
 
-      const { data, error } = await supabase.functions.invoke("project-chat", {
-        body: {
-          messages: newHistory,
-          context: {
-            title: project?.name || "",
-            description,
-            bullet_breakdown: bullets,
-            execution_strategy: executionStrategy,
-            notes: allNotes,
-            tasks: tasksList,
-            widgets: widgetsList,
-          },
+      const data = await projectChat({
+        messages: newHistory,
+        context: {
+          title: project?.name || "",
+          description,
+          bullet_breakdown: bullets,
+          execution_strategy: executionStrategy,
+          notes: allNotes,
+          tasks: tasksList,
+          widgets: widgetsList,
         },
       });
-      if (error) throw error;
 
       // Process actions (skip if locked)
       let createdNoteId: string | null = null;
@@ -944,8 +942,10 @@ export default function ProjectWorkspace() {
         ...(createdLinks.length > 0 ? { links: createdLinks } : {}),
       };
       setChatHistory([...newHistory, assistantMsg]);
-    } catch (e: any) {
-      toast.error("Chat failed: " + e.message);
+    } catch (e: unknown) {
+      const err = e as Error & { code?: string };
+      if (err.code === "NO_API_KEY") openGeminiSettings();
+      toast.error("Chat failed: " + err.message);
     } finally {
       setIsChatThinking(false);
       setTimeout(() => chatScrollRef.current?.scrollTo({ top: chatScrollRef.current.scrollHeight, behavior: "smooth" }), 100);
@@ -1297,8 +1297,8 @@ export default function ProjectWorkspace() {
                         setGotchaChatHistory(history); setGotchaWhyRound(history.filter((m: any) => m.role === "user").length);
                         if (history.length === 0) {
                           setIsGotchaThinking(true); setShowGotchaModal(true);
-                          supabase.functions.invoke("gotcha-chat", { body: { symptom: g.symptom, chat_history: [{ role: "user", content: `The gotcha is: ${g.symptom}` }] } })
-                            .then(({ data }) => { setGotchaQuestion(data?.next_question || data?.message || "Why did this happen?"); setIsGotchaThinking(false); })
+                          gotchaChat({ symptom: g.symptom, chat_history: [{ role: "user", content: `The gotcha is: ${g.symptom}` }] })
+                            .then((data) => { setGotchaQuestion(data?.next_question || data?.message || "Why did this happen?"); setIsGotchaThinking(false); })
                             .catch(() => { setGotchaQuestion("Why did this happen?"); setIsGotchaThinking(false); });
                         } else {
                           const lastAssistant = [...history].reverse().find((m: any) => m.role === "assistant");
@@ -2156,8 +2156,9 @@ export default function ProjectWorkspace() {
                       setGotchaChatHistory(initHistory);
                       setGotchaWhyRound(1);
                       setGotchaModalState("autopsy");
-                      const { data } = await supabase.functions.invoke("gotcha-chat", {
-                        body: { symptom: gotchaSymptom.trim(), chat_history: initHistory },
+                      const data = await gotchaChat({
+                        symptom: gotchaSymptom.trim(),
+                        chat_history: initHistory,
                       });
                       setGotchaQuestion(data?.next_question || data?.message || "Why did this happen?");
                       queryClient.invalidateQueries({ queryKey: ["project-gotchas"] });
@@ -2223,8 +2224,9 @@ export default function ProjectWorkspace() {
                     setGotchaAnswer("");
                     try {
                       await supabase.from("gotchas").update({ chat_history: updatedHistory as any }).eq("id", activeGotchaId);
-                      const { data } = await supabase.functions.invoke("gotcha-chat", {
-                        body: { symptom: gotchaSymptom, chat_history: updatedHistory },
+                      const data = await gotchaChat({
+                        symptom: gotchaSymptom,
+                        chat_history: updatedHistory,
                       });
 
                       // Helper to insert a structured task with subtasks

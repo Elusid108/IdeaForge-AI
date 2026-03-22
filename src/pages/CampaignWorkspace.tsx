@@ -22,6 +22,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
 import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/lib/localDb";
+import { campaignChat, openGeminiSettings } from "@/services/ai-service";
 import { toast } from "sonner";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import EditableMarkdown from "@/components/EditableMarkdown";
@@ -310,14 +311,17 @@ export default function CampaignWorkspace() {
   const generateFirstQuestion = async () => {
     setIsInterviewThinking(true);
     try {
-      const { data, error } = await supabase.functions.invoke("campaign-chat", {
-        body: { mode: "generate_question", chat_history: interviewChatHistory, context: getInterviewContext() },
+      const data = await campaignChat({
+        mode: "generate_question",
+        chat_history: interviewChatHistory,
+        context: getInterviewContext(),
       });
-      if (error) throw error;
-      setCurrentQuestion(data.question);
-      if (data.topics_remaining) setTopicsRemaining(data.topics_remaining);
-    } catch (e: any) {
-      toast.error("Failed to generate question: " + e.message);
+      setCurrentQuestion(data.question as string);
+      if (data.topics_remaining) setTopicsRemaining(data.topics_remaining as string[]);
+    } catch (e: unknown) {
+      const err = e as Error & { code?: string };
+      if (err.code === "NO_API_KEY") openGeminiSettings();
+      toast.error("Failed to generate question: " + err.message);
     } finally {
       setIsInterviewThinking(false);
     }
@@ -329,12 +333,17 @@ export default function CampaignWorkspace() {
     const userMsg: ChatMsg = { role: "user", content: `Q: ${currentQuestion}\nA: ${interviewAnswer.trim()}` };
     const newHistory = [...interviewChatHistory, userMsg];
     try {
-      const { data, error } = await supabase.functions.invoke("campaign-chat", {
-        body: { mode: "submit_answer", answer: interviewAnswer.trim(), question: currentQuestion, chat_history: newHistory, context: getInterviewContext() },
+      const data = await campaignChat({
+        mode: "submit_answer",
+        answer: interviewAnswer.trim(),
+        question: currentQuestion,
+        chat_history: newHistory,
+        context: getInterviewContext(),
       });
-      if (error) throw error;
       const { next_question, clarification, topics_remaining } = data;
-      if (topics_remaining) setTopicsRemaining(topics_remaining);
+      if (topics_remaining && Array.isArray(topics_remaining)) {
+        setTopicsRemaining(topics_remaining as string[]);
+      }
       const assistantContent = clarification || `Noted. Next question: ${next_question}`;
       const assistantMsg: ChatMsg = { role: "assistant", content: assistantContent };
       const finalHistory = [...newHistory, assistantMsg];
@@ -343,8 +352,10 @@ export default function CampaignWorkspace() {
       setInterviewAnswer("");
       await supabase.from("campaigns" as any).update({ chat_history: finalHistory }).eq("id", id!);
       queryClient.invalidateQueries({ queryKey: ["campaign", id] });
-    } catch (e: any) {
-      toast.error("Failed: " + e.message);
+    } catch (e: unknown) {
+      const err = e as Error & { code?: string };
+      if (err.code === "NO_API_KEY") openGeminiSettings();
+      toast.error("Failed: " + err.message);
     } finally {
       setIsInterviewThinking(false);
       setTimeout(() => textareaRef.current?.focus(), 50);
@@ -354,10 +365,11 @@ export default function CampaignWorkspace() {
   const handleForgePlaybook = async () => {
     setIsForging(true);
     try {
-      const { data, error } = await supabase.functions.invoke("campaign-chat", {
-        body: { mode: "forge_playbook", chat_history: interviewChatHistory, context: getInterviewContext() },
+      const data = await campaignChat({
+        mode: "forge_playbook",
+        chat_history: interviewChatHistory,
+        context: getInterviewContext(),
       });
-      if (error) throw error;
       const { playbook, ip_strategy, monetization_plan, marketing_plan, operations_plan, sales_model, primary_channel, tasks } = data;
       await supabase.from("campaigns" as any).update({
         playbook, ip_strategy: ip_strategy || "", monetization_plan: monetization_plan || "",
@@ -378,8 +390,10 @@ export default function CampaignWorkspace() {
       queryClient.invalidateQueries({ queryKey: ["campaign-tasks", id] });
       queryClient.invalidateQueries({ queryKey: ["sidebar-items"] });
       toast.success("Campaign Playbook forged!");
-    } catch (e: any) {
-      toast.error("Failed to forge playbook: " + e.message);
+    } catch (e: unknown) {
+      const err = e as Error & { code?: string };
+      if (err.code === "NO_API_KEY") openGeminiSettings();
+      toast.error("Failed to forge playbook: " + err.message);
     } finally {
       setIsForging(false);
     }
@@ -600,25 +614,22 @@ export default function CampaignWorkspace() {
           const wd = parseWidgetData(r.description);
           return `${r.title}: ${wd.summary || "(no summary)"} [code length: ${wd.code.length} chars]`;
         }).join("\n");
-      const { data, error } = await supabase.functions.invoke("campaign-chat", {
-        body: {
-          mode: "assistant",
-          chat_history: newHistory,
-          context: {
-            ...getInterviewContext(),
-            ip_strategy: campaign?.ip_strategy || "",
-            monetization_plan: campaign?.monetization_plan || "",
-            marketing_plan: campaign?.marketing_plan || "",
-            operations_plan: campaign?.operations_plan || "",
-            playbook: campaign?.playbook || "",
-            tasks: tasksList,
-            notes: notesList,
-            widgets: widgetsList,
-            status: campaign?.status || "",
-          },
+      const data = await campaignChat({
+        mode: "assistant",
+        chat_history: newHistory,
+        context: {
+          ...getInterviewContext(),
+          ip_strategy: campaign?.ip_strategy || "",
+          monetization_plan: campaign?.monetization_plan || "",
+          marketing_plan: campaign?.marketing_plan || "",
+          operations_plan: campaign?.operations_plan || "",
+          playbook: campaign?.playbook || "",
+          tasks: tasksList,
+          notes: notesList,
+          widgets: widgetsList,
+          status: campaign?.status || "",
         },
       });
-      if (error) throw error;
 
       // Process actions from tool calls
       let createdNoteId: string | null = null;
@@ -691,8 +702,10 @@ export default function CampaignWorkspace() {
         ...(createdLinks.length > 0 ? { links: createdLinks } : {}),
       };
       setChatHistory([...newHistory, assistantMsg]);
-    } catch (e: any) {
-      toast.error("Chat failed: " + e.message);
+    } catch (e: unknown) {
+      const err = e as Error & { code?: string };
+      if (err.code === "NO_API_KEY") openGeminiSettings();
+      toast.error("Chat failed: " + err.message);
     } finally {
       setIsChatThinking(false);
     }

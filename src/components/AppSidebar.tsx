@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import { ChevronRight, ChevronDown, LogOut, User, Trash2 } from "lucide-react";
+import { ChevronRight, ChevronDown, LogOut, User, Trash2, Settings } from "lucide-react";
 import IdeaForgeLogo from "@/components/IdeaForgeLogo";
 import { useAuth } from "@/contexts/AuthContext";
 import { NavLink } from "@/components/NavLink";
@@ -18,6 +18,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
+import { useGeminiSettingsStore } from "@/store/useGeminiSettingsStore";
 
 const sections = [
   { label: "Ideas", href: "/ideas", emoji: "💡", table: "ideas" as const },
@@ -62,6 +63,7 @@ function useSectionItems(table: "ideas" | "brainstorms" | "projects" | "campaign
 }
 
 export function AppSidebar() {
+  const setShowSettings = useGeminiSettingsStore((s) => s.setShowSettings);
   const { signOut, user } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
@@ -195,7 +197,16 @@ export function AppSidebar() {
         </SidebarGroup>
       </SidebarContent>
 
-      <SidebarFooter className="border-t border-sidebar-border p-3">
+      <SidebarFooter className="border-t border-sidebar-border p-3 space-y-2">
+        <Button
+          variant="outline"
+          size="sm"
+          className="w-full justify-start gap-2 text-sidebar-foreground"
+          onClick={() => setShowSettings(true)}
+        >
+          <Settings className="h-4 w-4" />
+          Gemini API
+        </Button>
         <div className="flex items-center gap-2">
           <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/10">
             <User className="h-4 w-4 text-primary" />

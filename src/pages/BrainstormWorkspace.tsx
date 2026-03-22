@@ -22,6 +22,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/lib/localDb";
+import { brainstormChat, generateExecutionStrategy, openGeminiSettings } from "@/services/ai-service";
 import { toast } from "sonner";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import EditableMarkdown from "@/components/EditableMarkdown";
@@ -302,19 +303,18 @@ export default function BrainstormWorkspace() {
   const generateFirstQuestion = async () => {
     setIsThinking(true);
     try {
-      const { data, error } = await supabase.functions.invoke("brainstorm-chat", {
-        body: {
-          mode: "generate_question",
-          compiled_description: brainstorm?.compiled_description || "",
-          bullet_breakdown: brainstorm?.bullet_breakdown || "",
-          chat_history: chatHistory,
-          context: getContext(),
-        },
+      const data = await brainstormChat({
+        mode: "generate_question",
+        compiled_description: brainstorm?.compiled_description || "",
+        bullet_breakdown: brainstorm?.bullet_breakdown || "",
+        chat_history: chatHistory,
+        context: getContext(),
       });
-      if (error) throw error;
-      setCurrentQuestion(data.question);
-    } catch (e: any) {
-      toast.error("Failed to generate question: " + e.message);
+      setCurrentQuestion(data.question as string);
+    } catch (e: unknown) {
+      const err = e as Error & { code?: string };
+      if (err.code === "NO_API_KEY") openGeminiSettings();
+      toast.error("Failed to generate question: " + err.message);
     } finally {
       setIsThinking(false);
     }
@@ -432,20 +432,20 @@ export default function BrainstormWorkspace() {
       const notesText = (bRefs || []).map((r: any) => `${r.title}: ${r.description || ""}`).join("\n");
 
       // Generate execution strategy in background
-      supabase.functions.invoke("generate-strategy", {
-        body: {
-          title: brainstorm?.title || "",
-          description,
-          bullets,
-          tags: bTags,
-          category: bCategory,
-          notes: notesText,
-        },
-      }).then(async (res) => {
-        if (!res.error && res.data?.strategy) {
-          await supabase.from("projects").update({ execution_strategy: res.data.strategy } as any).eq("id", data.id);
-        }
-      }).catch((err) => console.error("Strategy generation failed:", err));
+      generateExecutionStrategy({
+        title: brainstorm?.title || "",
+        description,
+        bullets,
+        tags: bTags,
+        category: bCategory,
+        notes: notesText,
+      })
+        .then(async (res) => {
+          if (res?.strategy) {
+            await supabase.from("projects").update({ execution_strategy: res.strategy } as any).eq("id", data.id);
+          }
+        })
+        .catch((err) => console.error("Strategy generation failed:", err));
 
       return data;
     },
@@ -611,18 +611,15 @@ export default function BrainstormWorkspace() {
     const newHistory = [...chatHistory, userMsg];
 
     try {
-      const { data, error } = await supabase.functions.invoke("brainstorm-chat", {
-        body: {
-          mode: "submit_answer",
-          answer: answer.trim(),
-          question: currentQuestion,
-          compiled_description: description,
-          bullet_breakdown: bullets,
-          chat_history: newHistory,
-          context: getContext(),
-        },
+      const data = await brainstormChat({
+        mode: "submit_answer",
+        answer: answer.trim(),
+        question: currentQuestion,
+        compiled_description: description,
+        bullet_breakdown: bullets,
+        chat_history: newHistory,
+        context: getContext(),
       });
-      if (error) throw error;
 
       const { updated_description, updated_bullets, updated_tags, next_question, clarification } = data;
 
@@ -665,8 +662,10 @@ export default function BrainstormWorkspace() {
         await supabase.from("brainstorms").update(updateFields).eq("id", id!);
         queryClient.invalidateQueries({ queryKey: ["brainstorm", id] });
       }
-    } catch (e: any) {
-      toast.error("Failed: " + e.message);
+    } catch (e: unknown) {
+      const err = e as Error & { code?: string };
+      if (err.code === "NO_API_KEY") openGeminiSettings();
+      toast.error("Failed: " + err.message);
     } finally {
       setIsThinking(false);
       setTimeout(() => textareaRef.current?.focus(), 50);
@@ -690,20 +689,17 @@ export default function BrainstormWorkspace() {
     setIsChatThinking(true);
 
     try {
-      const { data, error } = await supabase.functions.invoke("brainstorm-chat", {
-        body: {
-          mode: "chat_query",
-          chat_history: newHistory,
-          is_locked: isLocked,
-          context: {
-            ...getContext(),
-            compiled_description: description,
-            bullet_breakdown: bullets,
-            tags: (brainstorm as any)?.tags || [],
-          },
+      const data = await brainstormChat({
+        mode: "chat_query",
+        chat_history: newHistory,
+        is_locked: isLocked,
+        context: {
+          ...getContext(),
+          compiled_description: description,
+          bullet_breakdown: bullets,
+          tags: (brainstorm as any)?.tags || [],
         },
       });
-      if (error) throw error;
 
       // Process actions
       let createdNoteId: string | null = null;
@@ -764,8 +760,10 @@ export default function BrainstormWorkspace() {
         ...(createdLinks.length > 0 ? { links: createdLinks } : {}),
       };
       setQueryChatHistory([...newHistory, assistantMsg]);
-    } catch (e: any) {
-      toast.error("Chat failed: " + e.message);
+    } catch (e: unknown) {
+      const err = e as Error & { code?: string };
+      if (err.code === "NO_API_KEY") openGeminiSettings();
+      toast.error("Chat failed: " + err.message);
     } finally {
       setIsChatThinking(false);
       setTimeout(() => chatScrollRef.current?.scrollTo({ top: chatScrollRef.current.scrollHeight, behavior: "smooth" }), 100);

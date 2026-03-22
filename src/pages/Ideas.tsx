@@ -12,6 +12,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/lib/localDb";
+import { openGeminiSettings, processIdeaClient } from "@/services/ai-service";
 import { toast } from "sonner";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
@@ -475,14 +476,15 @@ export default function IdeasPage() {
       setRawDump("");
       pendingIdeaIdRef.current = data.id;
       toast.success("Idea captured! AI is processing…");
-      supabase.functions
-        .invoke("process-idea", { body: { idea_id: data.id, raw_dump: data.raw_dump } })
-        .then(({ error }) => {
-          if (error) {
-            console.error("AI processing error:", error);
-            toast.error("AI processing failed — you can retry later.");
-            pendingIdeaIdRef.current = null;
-          }
+      void processIdeaClient(supabase, { idea_id: data.id, raw_dump: data.raw_dump })
+        .catch((err: unknown) => {
+          console.error("AI processing error:", err);
+          const e = err as Error & { code?: string };
+          if (e.code === "NO_API_KEY") openGeminiSettings();
+          toast.error("AI processing failed — add a valid API key in Settings or try again.");
+          pendingIdeaIdRef.current = null;
+        })
+        .finally(() => {
           queryClient.invalidateQueries({ queryKey: ["ideas"] });
         });
     },
