@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
 import { useGeminiSettingsStore } from "@/store/useGeminiSettingsStore";
+import { APP_VERSION } from "@/lib/appVersion";
 
 const sections = [
   { label: "Ideas", href: "/ideas", emoji: "💡", table: "ideas" as const },
@@ -110,7 +111,7 @@ export function AppSidebar() {
           <IdeaForgeLogo className="h-5 w-5 text-primary" />
         </div>
         <span className="font-semibold text-sidebar-foreground">IdeaForge.AI</span>
-        <span className="text-[10px] text-muted-foreground font-medium bg-muted px-1.5 py-0.5 rounded">v0.5</span>
+        <span className="text-[10px] text-muted-foreground font-medium bg-muted px-1.5 py-0.5 rounded">v{APP_VERSION}</span>
       </div>
 
       <SidebarContent className="px-2 py-3">

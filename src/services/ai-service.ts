@@ -11,7 +11,7 @@ export function openGeminiSettings(): void {
 
 function getKeyAndModel(): { key: string; model: string } {
   const key = getApiKey()?.trim() || useGeminiSettingsStore.getState().apiKey?.trim();
-  const model = useGeminiSettingsStore.getState().selectedTextModel || "gemini-2.0-flash";
+  const model = useGeminiSettingsStore.getState().selectedTextModel || "gemini-2.5-flash";
   if (!key) {
     const err = new Error("Add a Gemini API key in Settings to use AI features.");
     (err as Error & { code?: string }).code = "NO_API_KEY";

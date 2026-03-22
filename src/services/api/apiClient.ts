@@ -4,7 +4,7 @@ export const callTextAI = async (
   key: string,
   systemInstruction: string,
   userPrompt: string,
-  model: string = "gemini-2.0-flash"
+  model: string = "gemini-2.5-flash"
 ): Promise<string> => {
   const modelId = model.replace(/^models\//, "");
 

@@ -79,7 +79,39 @@ const REF_ICON_COLORS: Record<string, string> = {
 const REF_TYPE_ORDER: RefType[] = ["note", "link", "image", "video", "file", "widget"];
 const REF_TYPE_LABELS: Record<string, string> = { note: "Notes", link: "Links", image: "Images", video: "Videos", file: "Files", widget: "Widgets" };
 
-const stripHtml = (html: string) => html?.replace(/<[^>]*>/g, "").trim() || "";
+function coerceTextField(value: unknown, arrayJoin = ", "): string {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    const parts = value.map((v) => coerceTextField(v, arrayJoin)).filter((s) => s.length > 0);
+    return parts.join(arrayJoin);
+  }
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return "";
+}
+
+function keyFeaturesToHtml(value: unknown): string {
+  const s = coerceTextField(value, "\n");
+  if (!s) return "";
+  return s.replace(/^- /gm, "• ").replace(/\n/g, "<br/>");
+}
+
+function normalizeTagList(value: unknown): string[] {
+  if (value == null) return [];
+  if (Array.isArray(value)) return value.map(String).filter(Boolean);
+  if (typeof value === "string") {
+    const t = value.trim();
+    if (!t) return [];
+    if (t.includes(",")) return t.split(/\s*,\s*/).map((s) => s.trim()).filter(Boolean);
+    return [t];
+  }
+  return [];
+}
+
+const stripHtml = (html: unknown) => {
+  const s = coerceTextField(html, "\n");
+  return s.replace(/<[^>]*>/g, "").trim() || "";
+};
 
 export default function CampaignWorkspace() {
   const { id } = useParams<{ id: string }>();
@@ -579,7 +611,11 @@ export default function CampaignWorkspace() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["campaign-refs", id] }),
   });
 
-  const ensureHttps = (url: string) => (!url ? url : url.match(/^https?:\/\//) ? url : `https://${url}`);
+  const ensureHttps = (url: unknown) => {
+    const u = String(url ?? "").trim();
+    if (!u) return "";
+    return u.match(/^https?:\/\//) ? u : `https://${u}`;
+  };
 
   const handleRefClick = (ref: any) => {
     if (ref.type === "link" && ref.url) { window.open(ensureHttps(ref.url), "_blank", "noopener,noreferrer"); }
@@ -734,7 +770,7 @@ export default function CampaignWorkspace() {
             queryClient.invalidateQueries({ queryKey: ["campaign-refs", id] });
             toast.success(`Widget created: ${action.title}`);
           } else if (action.action === "update_widget" && action.title) {
-            const existingWidget = campaignRefs.find((r: any) => r.type === "widget" && r.title.toLowerCase() === action.title.toLowerCase());
+            const existingWidget = campaignRefs.find((r: any) => r.type === "widget" && String(r.title ?? "").toLowerCase() === String(action.title ?? "").toLowerCase());
             if (existingWidget) {
               const existingData = parseWidgetData(existingWidget.description);
               const updatedDesc = encodeWidgetData(action.code || existingData.code, action.summary || existingData.summary, action.instructions || existingData.instructions);
@@ -745,9 +781,11 @@ export default function CampaignWorkspace() {
               toast.success(`Widget updated: ${action.new_title || action.title}`);
             }
           } else if (action.action === "create_link" && action.title && action.url) {
+            const rawUrl = String(action.url);
+            const normalizedUrl = rawUrl.match(/^https?:\/\//) ? rawUrl : `https://${rawUrl}`;
             const { data: linkData } = await supabase.from("campaign_references" as any).insert({
               campaign_id: id!, user_id: user!.id, type: "link",
-              title: action.title, url: action.url.match(/^https?:\/\//) ? action.url : `https://${action.url}`,
+              title: action.title, url: normalizedUrl,
               description: action.description || "", sort_order: campaignRefs.length,
             }).select("id").single();
             if ((linkData as any)?.id) createdLinks.push({ id: (linkData as any).id, title: action.title });
@@ -896,11 +934,29 @@ export default function CampaignWorkspace() {
                 </div>
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Raw Dump</p>
-                  <div className="rounded-lg bg-muted/50 p-3 text-sm text-muted-foreground whitespace-pre-wrap">{linkedIdea.raw_dump}</div>
+                  <div className="rounded-lg bg-muted/50 p-3 text-sm text-muted-foreground whitespace-pre-wrap">{coerceTextField(linkedIdea.raw_dump, "\n")}</div>
                 </div>
-                {linkedIdea.processed_summary && <div><p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Summary</p><p className="text-sm leading-relaxed">{linkedIdea.processed_summary}</p></div>}
-                {linkedIdea.key_features && <div><p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Key Features</p><div className="text-sm text-muted-foreground"><div dangerouslySetInnerHTML={{ __html: linkedIdea.key_features.replace(/^- /gm, "• ").replace(/\n/g, "<br/>") }} /></div></div>}
-                {linkedIdea.tags && linkedIdea.tags.length > 0 && <div className="flex flex-wrap gap-1">{linkedIdea.tags.map((tag: string) => <Badge key={tag} variant="secondary" className="text-xs">{tag}</Badge>)}</div>}
+                {!!coerceTextField(linkedIdea.processed_summary, "\n") && (
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Summary</p>
+                    <p className="text-sm leading-relaxed">{coerceTextField(linkedIdea.processed_summary, "\n")}</p>
+                  </div>
+                )}
+                {keyFeaturesToHtml(linkedIdea.key_features) ? (
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Key Features</p>
+                    <div className="text-sm text-muted-foreground">
+                      <div dangerouslySetInnerHTML={{ __html: keyFeaturesToHtml(linkedIdea.key_features) }} />
+                    </div>
+                  </div>
+                ) : null}
+                {normalizeTagList(linkedIdea.tags).length > 0 && (
+                  <div className="flex flex-wrap gap-1">
+                    {normalizeTagList(linkedIdea.tags).map((tag, i) => (
+                      <Badge key={`${tag}-${i}`} variant="secondary" className="text-xs">{tag}</Badge>
+                    ))}
+                  </div>
+                )}
               </div>
               <DialogFooter><Button variant="ghost" onClick={() => setShowLinkedIdea(false)}>Close</Button></DialogFooter>
             </DialogContent>
@@ -1005,26 +1061,28 @@ export default function CampaignWorkspace() {
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
         {/* Left column — Playbook sections */}
         <div className="lg:col-span-3 space-y-6">
-          {(campaign.ip_strategy || campaign.monetization_plan || campaign.marketing_plan || campaign.operations_plan) ? (
+          {(coerceTextField(campaign.ip_strategy, "\n") || coerceTextField(campaign.monetization_plan, "\n") || coerceTextField(campaign.marketing_plan, "\n") || coerceTextField(campaign.operations_plan, "\n")) ? (
             <>
-              <PlaybookSection label="Discovery & IP Strategy" field="ip_strategy" value={campaign.ip_strategy || ""} updateCampaign={updateCampaign} />
-              <PlaybookSection label="Monetization Strategy" field="monetization_plan" value={campaign.monetization_plan || ""} updateCampaign={updateCampaign} />
-              <PlaybookSection label="Distribution & Marketing" field="marketing_plan" value={campaign.marketing_plan || ""} updateCampaign={updateCampaign} />
-              <PlaybookSection label="Logistics & Operations" field="operations_plan" value={campaign.operations_plan || ""} updateCampaign={updateCampaign} />
+              <PlaybookSection label="Discovery & IP Strategy" field="ip_strategy" value={coerceTextField(campaign.ip_strategy, "\n")} updateCampaign={updateCampaign} />
+              <PlaybookSection label="Monetization Strategy" field="monetization_plan" value={coerceTextField(campaign.monetization_plan, "\n")} updateCampaign={updateCampaign} />
+              <PlaybookSection label="Distribution & Marketing" field="marketing_plan" value={coerceTextField(campaign.marketing_plan, "\n")} updateCampaign={updateCampaign} />
+              <PlaybookSection label="Logistics & Operations" field="operations_plan" value={coerceTextField(campaign.operations_plan, "\n")} updateCampaign={updateCampaign} />
             </>
           ) : (
-            <EditablePlaybook initialValue={campaign.playbook || ""} updateCampaign={updateCampaign} />
+            <EditablePlaybook initialValue={coerceTextField(campaign.playbook, "\n")} updateCampaign={updateCampaign} />
           )}
         </div>
 
         {/* Right column — Tags + Resources */}
         <div className="lg:col-span-2 space-y-6">
           {/* Tags */}
-          {campaign.tags && campaign.tags.length > 0 && (
+          {normalizeTagList(campaign.tags).length > 0 && (
             <div>
               <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Tags</p>
               <div className="flex flex-wrap gap-1.5">
-                {campaign.tags.map((tag: string) => <Badge key={tag} variant="secondary" className="text-xs">{tag}</Badge>)}
+                {normalizeTagList(campaign.tags).map((tag, i) => (
+                  <Badge key={`${tag}-${i}`} variant="secondary" className="text-xs">{tag}</Badge>
+                ))}
               </div>
             </div>
           )}
@@ -1442,10 +1500,28 @@ export default function CampaignWorkspace() {
                 <p className="text-xs text-muted-foreground">Created {format(new Date(linkedIdea.created_at), "MMM d, yyyy 'at' h:mm a")}</p>
                 {linkedIdea.category && <Badge className={`text-xs border ${CATEGORY_COLORS[linkedIdea.category] || "bg-secondary text-secondary-foreground"}`}>{linkedIdea.category}</Badge>}
               </div>
-              <div><p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Raw Dump</p><div className="rounded-lg bg-muted/50 p-3 text-sm text-muted-foreground whitespace-pre-wrap">{linkedIdea.raw_dump}</div></div>
-              {linkedIdea.processed_summary && <div><p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Summary</p><p className="text-sm leading-relaxed">{linkedIdea.processed_summary}</p></div>}
-              {linkedIdea.key_features && <div><p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Key Features</p><div className="text-sm text-muted-foreground"><div dangerouslySetInnerHTML={{ __html: linkedIdea.key_features.replace(/^- /gm, "• ").replace(/\n/g, "<br/>") }} /></div></div>}
-              {linkedIdea.tags && linkedIdea.tags.length > 0 && <div className="flex flex-wrap gap-1">{linkedIdea.tags.map((tag: string) => <Badge key={tag} variant="secondary" className="text-xs">{tag}</Badge>)}</div>}
+              <div><p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Raw Dump</p><div className="rounded-lg bg-muted/50 p-3 text-sm text-muted-foreground whitespace-pre-wrap">{coerceTextField(linkedIdea.raw_dump, "\n")}</div></div>
+              {!!coerceTextField(linkedIdea.processed_summary, "\n") && (
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Summary</p>
+                  <p className="text-sm leading-relaxed">{coerceTextField(linkedIdea.processed_summary, "\n")}</p>
+                </div>
+              )}
+              {keyFeaturesToHtml(linkedIdea.key_features) ? (
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Key Features</p>
+                  <div className="text-sm text-muted-foreground">
+                    <div dangerouslySetInnerHTML={{ __html: keyFeaturesToHtml(linkedIdea.key_features) }} />
+                  </div>
+                </div>
+              ) : null}
+              {normalizeTagList(linkedIdea.tags).length > 0 && (
+                <div className="flex flex-wrap gap-1">
+                  {normalizeTagList(linkedIdea.tags).map((tag, i) => (
+                    <Badge key={`${tag}-${i}`} variant="secondary" className="text-xs">{tag}</Badge>
+                  ))}
+                </div>
+              )}
             </div>
             <DialogFooter><Button variant="ghost" onClick={() => setShowLinkedIdea(false)}>Close</Button></DialogFooter>
           </DialogContent>
@@ -1506,7 +1582,8 @@ export default function CampaignWorkspace() {
                       onClick={() => {
                         const link = campaignRefs.find((r: any) => r.id === msg.linkId);
                         if (link) {
-                          const url = link.url?.match(/^https?:\/\//) ? link.url : `https://${link.url}`;
+                          const raw = String(link.url ?? "");
+                          const url = raw.match(/^https?:\/\//) ? raw : `https://${raw}`;
                           window.open(url, "_blank", "noopener,noreferrer");
                         }
                       }}
@@ -1524,7 +1601,8 @@ export default function CampaignWorkspace() {
                           onClick={() => {
                             const ref = campaignRefs.find((r: any) => r.id === link.id);
                             if (ref) {
-                              const url = ref.url?.match(/^https?:\/\//) ? ref.url : `https://${ref.url}`;
+                              const raw = String(ref.url ?? "");
+                              const url = raw.match(/^https?:\/\//) ? raw : `https://${raw}`;
                               window.open(url, "_blank", "noopener,noreferrer");
                             }
                           }}

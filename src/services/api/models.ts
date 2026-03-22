@@ -91,7 +91,13 @@ export async function fetchModels(key: string): Promise<void> {
     const { selectedImageModel, setSelectedImageModel } = useGeminiSettingsStore.getState();
     const modelIds = sortedImage.map((m) => m.name.replace(/^models\//, ""));
     if (sortedImage.length > 0 && !modelIds.includes(selectedImageModel)) {
-      const safeDefault = sortedImage.find((m) => m.imageEndpoint === "predict") || sortedImage[0];
+      const nanoBanana = sortedImage.find((m) =>
+        m.displayName.toLowerCase().includes("nano banana")
+      );
+      const safeDefault =
+        nanoBanana ||
+        sortedImage.find((m) => m.imageEndpoint === "predict") ||
+        sortedImage[0];
       setSelectedImageModel(safeDefault.name.replace(/^models\//, ""));
     }
   } catch {

@@ -37,8 +37,8 @@ export const useGeminiSettingsStore = create<GeminiSettingsState>((set) => ({
 
   availableTextModels: [],
   availableImageModels: [],
-  selectedTextModel: getSelectedTextModel() ?? "gemini-2.0-flash",
-  selectedImageModel: getSelectedImageModel() ?? "imagen-3.0-generate-002",
+  selectedTextModel: getSelectedTextModel() ?? "gemini-2.5-flash",
+  selectedImageModel: getSelectedImageModel() ?? "gemini-2.5-flash-image",
   setAvailableTextModels: (models: ModelOption[]) => set({ availableTextModels: models }),
   setAvailableImageModels: (models: ModelOption[]) => set({ availableImageModels: models }),
   setSelectedTextModel: (model: string) => {

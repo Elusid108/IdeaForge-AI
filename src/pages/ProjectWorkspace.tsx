@@ -39,6 +39,7 @@ import { useActionUndo } from "@/hooks/useActionUndo";
 import TaskCommentButton from "@/components/TaskCommentButton";
 import TaskCommentsSection from "@/components/TaskCommentsSection";
 import { encodeWidgetData, parseWidgetData, WIDGET_TEMPLATES } from "@/lib/widgetUtils";
+import { keyFeaturesToHtml, normalizeIdeaTags, normalizeIdeaText } from "@/lib/ideaText";
 
 type RefType = "link" | "image" | "video" | "note" | "file" | "widget";
 type SortMode = "az" | "za" | "newest" | "oldest";
@@ -790,6 +791,8 @@ export default function ProjectWorkspace() {
     enabled: !!linkedIdeaId,
   });
 
+  const linkedIdeaTags = linkedIdeaData ? normalizeIdeaTags(linkedIdeaData.tags) : [];
+
   // GitHub Pages link
   const githubPagesUrl = useMemo(() => {
     if (!githubData) return null;
@@ -814,11 +817,11 @@ export default function ProjectWorkspace() {
       // Gather context
       const brainstormNotes = brainstormRefs
         .filter((r: any) => r.type === "note")
-        .map((r: any) => `${r.title}: ${stripHtml(r.description || "")}`)
+        .map((r: any) => `${r.title}: ${stripHtml(normalizeIdeaText(r.description))}`)
         .join("\n");
       const projectNotes = references
         .filter((r: any) => r.type === "note")
-        .map((r: any) => `${r.title}: ${stripHtml(r.description || "")}`)
+        .map((r: any) => `${r.title}: ${stripHtml(normalizeIdeaText(r.description))}`)
         .join("\n");
       const allNotes = [brainstormNotes, projectNotes].filter(Boolean).join("\n");
       const tasksList = tasks.map((t: any) => `[${t.completed ? "✓" : " "}] ${t.title} (${t.priority}${t.due_date ? ", due " + t.due_date : ""})`).join("\n");
@@ -1415,7 +1418,7 @@ export default function ProjectWorkspace() {
                 {brainstormRefs.map((ref: any) => {
                   const Icon = REF_ICONS[ref.type] || StickyNote;
                   const iconColor = REF_ICON_COLORS[ref.type] || "text-muted-foreground";
-                  const previewText = ref.type === "note" ? stripHtml(ref.description) : ref.description;
+                  const previewText = ref.type === "note" ? stripHtml(normalizeIdeaText(ref.description)) : ref.description;
                   return (
                     <div
                       key={ref.id}
@@ -1600,7 +1603,7 @@ export default function ProjectWorkspace() {
                             const Icon = REF_ICONS[ref.type] || StickyNote;
                             const iconColor = REF_ICON_COLORS[ref.type] || "text-muted-foreground";
                             const thumbnail = getRefThumbnail(ref);
-                            const previewText = ref.type === "note" ? stripHtml(ref.description) : ref.type === "widget" ? parseWidgetData(ref.description).summary : ref.description;
+                            const previewText = ref.type === "note" ? stripHtml(normalizeIdeaText(ref.description)) : ref.type === "widget" ? parseWidgetData(ref.description).summary : ref.description;
 
                             if (refViewMode === "list") {
                               return (
@@ -2064,13 +2067,13 @@ export default function ProjectWorkspace() {
         <Dialog open={showLinkedIdea} onOpenChange={setShowLinkedIdea}>
           <DialogContent className="sm:max-w-2xl max-h-[85vh] overflow-y-auto">
             <DialogHeader>
-              <DialogTitle>{linkedIdeaData.title || "Linked Idea"}</DialogTitle>
+              <DialogTitle>{normalizeIdeaText(linkedIdeaData.title).trim() || "Linked Idea"}</DialogTitle>
               <DialogDescription className="sr-only">View linked idea details</DialogDescription>
             </DialogHeader>
             <div className="space-y-4">
               <div className="flex items-center gap-2 flex-wrap">
                 <p className="text-xs text-muted-foreground">
-                  Created {format(new Date(linkedIdeaData.created_at), "MMM d, yyyy 'at' h:mm a")}
+                  Created {linkedIdeaData.created_at ? format(new Date(linkedIdeaData.created_at), "MMM d, yyyy 'at' h:mm a") : "—"}
                 </p>
                 {linkedIdeaData.category && (
                   <Badge className={`text-xs border ${CATEGORY_COLORS[linkedIdeaData.category] || "bg-secondary text-secondary-foreground"}`}>{linkedIdeaData.category}</Badge>
@@ -2079,26 +2082,26 @@ export default function ProjectWorkspace() {
               <div>
                 <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Raw Dump</p>
                 <div className="rounded-lg bg-muted/50 p-3 text-sm text-muted-foreground whitespace-pre-wrap">
-                  {linkedIdeaData.raw_dump}
+                  {normalizeIdeaText(linkedIdeaData.raw_dump)}
                 </div>
               </div>
-              {linkedIdeaData.processed_summary && (
+              {normalizeIdeaText(linkedIdeaData.processed_summary).trim() ? (
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Summary</p>
-                  <p className="text-sm leading-relaxed">{linkedIdeaData.processed_summary}</p>
+                  <p className="text-sm leading-relaxed">{normalizeIdeaText(linkedIdeaData.processed_summary)}</p>
                 </div>
-              )}
-              {linkedIdeaData.key_features && (
+              ) : null}
+              {normalizeIdeaText(linkedIdeaData.key_features).trim() ? (
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1">Key Features</p>
                   <div className="text-sm text-muted-foreground">
-                    <div dangerouslySetInnerHTML={{ __html: linkedIdeaData.key_features.replace(/^- /gm, "• ").replace(/\n/g, "<br/>") }} />
+                    <div dangerouslySetInnerHTML={{ __html: keyFeaturesToHtml(linkedIdeaData.key_features) }} />
                   </div>
                 </div>
-              )}
-              {linkedIdeaData.tags && linkedIdeaData.tags.length > 0 && (
+              ) : null}
+              {linkedIdeaTags.length > 0 && (
                 <div className="flex flex-wrap gap-1">
-                  {linkedIdeaData.tags.map((tag: string) => (
+                  {linkedIdeaTags.map((tag: string) => (
                     <Badge key={tag} variant="secondary" className="text-xs">{tag}</Badge>
                   ))}
                 </div>
@@ -2301,8 +2304,9 @@ export default function ProjectWorkspace() {
                           title = `${defaultTitlePrefix}: ${taskData.split(" ").slice(0, 6).join(" ")}`;
                           description = taskData;
                         } else {
-                          title = taskData.title || `${defaultTitlePrefix}: ${(taskData.description || "").split(" ").slice(0, 6).join(" ")}`;
-                          description = taskData.description || "";
+                          const descStr = normalizeIdeaText(taskData.description);
+                          title = taskData.title || `${defaultTitlePrefix}: ${descStr.split(" ").slice(0, 6).join(" ")}`;
+                          description = descStr;
                           subtasks = taskData.subtasks || [];
                         }
 
