@@ -100,6 +100,17 @@ const loadGapi = () => {
 let signInResolver = null;
 let signInRejecter = null;
 
+/** Pending silent refresh from {@link handleTokenExpiration} (must not overlap sign-in). */
+let tokenRefreshDeferred = null;
+let tokenRefreshTimeoutId = null;
+
+function clearTokenRefreshTimeout() {
+    if (tokenRefreshTimeoutId !== null) {
+        clearTimeout(tokenRefreshTimeoutId);
+        tokenRefreshTimeoutId = null;
+    }
+}
+
 // Initialize Google Identity Services
 const initGoogleAuth = () => {
     return new Promise((resolve, reject) => {
@@ -139,6 +150,11 @@ const initTokenClient = (resolve, reject) => {
                     signInRejecter(new Error(error?.message || 'OAuth error'));
                     signInResolver = null;
                     signInRejecter = null;
+                } else if (tokenRefreshDeferred) {
+                    clearTokenRefreshTimeout();
+                    const d = tokenRefreshDeferred;
+                    tokenRefreshDeferred = null;
+                    d.reject(new Error(error?.message || 'OAuth error'));
                 }
             },
             callback: async (response) => {
@@ -148,6 +164,11 @@ const initTokenClient = (resolve, reject) => {
                         signInRejecter(new Error(response.error));
                         signInResolver = null;
                         signInRejecter = null;
+                    } else if (tokenRefreshDeferred) {
+                        clearTokenRefreshTimeout();
+                        const d = tokenRefreshDeferred;
+                        tokenRefreshDeferred = null;
+                        d.reject(new Error(response.error));
                     }
                     return;
                 }
@@ -174,7 +195,11 @@ const initTokenClient = (resolve, reject) => {
                     }
                     signInResolver = null;
                     signInRejecter = null;
-                } else {
+                } else if (tokenRefreshDeferred) {
+                    clearTokenRefreshTimeout();
+                    const d = tokenRefreshDeferred;
+                    tokenRefreshDeferred = null;
+                    d.resolve(true);
                 }
             },
         });
@@ -208,6 +233,12 @@ const signIn = () => {
 
 // Sign out user
 const signOut = () => {
+    clearTokenRefreshTimeout();
+    if (tokenRefreshDeferred) {
+        const d = tokenRefreshDeferred;
+        tokenRefreshDeferred = null;
+        d.reject(new Error('Signed out'));
+    }
     if (accessToken) {
         google.accounts.oauth2.revoke(accessToken);
         accessToken = null;
@@ -316,17 +347,54 @@ const getUserInfo = async () => {
     }
 };
 
-// Handle token expiration
+/**
+ * Request a new access token via GIS (silent). Resolves when the token callback runs.
+ * Does not run while a sign-in flow holds {@link signInResolver}. Concurrent callers share one refresh.
+ */
 const handleTokenExpiration = async () => {
     try {
-        // Try to refresh token
-        if (tokenClient) {
-            tokenClient.requestAccessToken({ prompt: '' });
+        if (!gapiLoaded) {
+            await loadGapi();
+        }
+        if (!tokenClient) {
+            await initGoogleAuth();
+        }
+        if (!tokenClient) {
+            return false;
+        }
+        if (signInResolver != null || signInRejecter != null) {
+            return false;
+        }
+        if (tokenRefreshDeferred) {
+            await tokenRefreshDeferred.promise;
             return true;
         }
-        return false;
+
+        const deferred = {};
+        deferred.promise = new Promise((resolve, reject) => {
+            deferred.resolve = resolve;
+            deferred.reject = reject;
+        });
+        tokenRefreshDeferred = deferred;
+
+        const REFRESH_TIMEOUT_MS = 60000;
+        tokenRefreshTimeoutId = setTimeout(() => {
+            tokenRefreshTimeoutId = null;
+            if (tokenRefreshDeferred === deferred) {
+                tokenRefreshDeferred = null;
+                deferred.reject(new Error('Token refresh timeout'));
+            }
+        }, REFRESH_TIMEOUT_MS);
+
+        tokenClient.requestAccessToken({ prompt: '' });
+        await deferred.promise;
+        return true;
     } catch (error) {
-        console.error('Token refresh failed:', error);
+        console.warn('Token refresh failed:', error);
+        clearTokenRefreshTimeout();
+        if (tokenRefreshDeferred) {
+            tokenRefreshDeferred = null;
+        }
         return false;
     }
 };

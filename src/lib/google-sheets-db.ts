@@ -8,10 +8,13 @@ import {
   handleTokenExpiration,
   loadGapi,
 } from "@/lib/google-api";
+import { DRIVE_FILE_SCOPE } from "@/lib/google-config";
 
 const SHEETS_API = "https://sheets.googleapis.com/v4/spreadsheets";
 
 export const DB_SPREADSHEET_TITLE = "IdeaForge_DB";
+/** My Drive root folder for the database spreadsheet (visible in Drive). */
+const DATA_FOLDER_NAME = "IdeaForge AI Data";
 const STORAGE_KEY_SPREADSHEET_ID = "ideaforge_sheets_db_id";
 
 export type CoreTableName =
@@ -701,19 +704,62 @@ function driveApiErrorMessage(error: unknown): string {
   return e?.result?.error?.message ?? e?.message ?? String(error);
 }
 
-async function driveListAppDataSpreadsheet(
+/** Minimal Drive v3 `files` list item for strict typing. */
+interface DriveFileListItem {
+  id?: string;
+  name?: string;
+}
+
+interface DriveFilesListResult {
+  files?: DriveFileListItem[];
+}
+
+interface DriveFileCreateResult {
+  id?: string;
+}
+
+let cachedDataFolderId: string | null = null;
+let dataFolderCreationLock: Promise<string> | null = null;
+
+/** True if the access token includes {@link DRIVE_FILE_SCOPE} (via OAuth2 tokeninfo). */
+async function tokenHasDriveFileScope(accessToken: string): Promise<boolean> {
+  try {
+    const url = new URL("https://www.googleapis.com/oauth2/v1/tokeninfo");
+    url.searchParams.set("access_token", accessToken);
+    const res = await fetch(url.toString());
+    if (!res.ok) return false;
+    const data = (await res.json()) as { scope?: string; error?: string };
+    if (data.error) return false;
+    const scopes = (data.scope ?? "").split(/\s+/).filter(Boolean);
+    return scopes.includes(DRIVE_FILE_SCOPE);
+  } catch {
+    return false;
+  }
+}
+
+function isInsufficientDrivePermissionMessage(message: string): boolean {
+  const m = message.toLowerCase();
+  return (
+    m.includes("insufficient authentication scopes") ||
+    m.includes("insufficient permission") ||
+    m.includes("access not granted") ||
+    m.includes("request had insufficient authentication scopes")
+  );
+}
+
+async function driveListFoldersInRoot(
   allowRetry: boolean,
-): Promise<{ id: string; name: string }[]> {
-  const q = `name='${DB_SPREADSHEET_TITLE.replace(/'/g, "\\'")}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`;
+): Promise<DriveFileListItem[]> {
+  const escaped = DATA_FOLDER_NAME.replace(/'/g, "\\'");
+  const q = `name='${escaped}' and mimeType='application/vnd.google-apps.folder' and 'root' in parents and trashed=false`;
   try {
     const response = await gapi.client.drive.files.list({
       q,
-      spaces: "appDataFolder",
       fields: "files(id,name)",
       pageSize: 10,
     });
-    const files = response.result.files ?? [];
-    return files.filter((f): f is { id: string; name: string } => !!f.id);
+    const result = response.result as DriveFilesListResult;
+    return result.files ?? [];
   } catch (error: unknown) {
     const err = error as { status?: number };
     if ((err.status === 401 || err.status === 403) && allowRetry) {
@@ -722,24 +768,27 @@ async function driveListAppDataSpreadsheet(
       if (!token) throw new Error("Not authenticated: no access token");
       gapi.client.setToken({ access_token: token });
       await new Promise((r) => setTimeout(r, 400));
-      return driveListAppDataSpreadsheet(false);
+      return driveListFoldersInRoot(false);
     }
-    throw new Error(`Drive files.list failed: ${driveApiErrorMessage(error)}`);
+    throw new Error(`Drive files.list (folder) failed: ${driveApiErrorMessage(error)}`);
   }
 }
 
-async function driveCreateAppDataSpreadsheet(allowRetry: boolean): Promise<string> {
+async function driveCreateDataFolder(allowRetry: boolean): Promise<string> {
   try {
     const response = await gapi.client.drive.files.create({
       resource: {
-        name: DB_SPREADSHEET_TITLE,
-        mimeType: "application/vnd.google-apps.spreadsheet",
-        parents: ["appDataFolder"],
+        name: DATA_FOLDER_NAME,
+        mimeType: "application/vnd.google-apps.folder",
+        parents: ["root"],
       },
       fields: "id",
     });
-    const id = response.result.id;
-    if (!id) throw new Error("Drive files.create returned no id");
+    const result = response.result as DriveFileCreateResult;
+    const id = result.id;
+    if (typeof id !== "string" || id.length === 0) {
+      throw new Error("Drive files.create (folder) returned no id");
+    }
     return id;
   } catch (error: unknown) {
     const err = error as { status?: number };
@@ -749,7 +798,118 @@ async function driveCreateAppDataSpreadsheet(allowRetry: boolean): Promise<strin
       if (!token) throw new Error("Not authenticated: no access token");
       gapi.client.setToken({ access_token: token });
       await new Promise((r) => setTimeout(r, 400));
-      return driveCreateAppDataSpreadsheet(false);
+      return driveCreateDataFolder(false);
+    }
+    throw new Error(
+      `Drive files.create (folder) failed: ${driveApiErrorMessage(error)}`,
+    );
+  }
+}
+
+/**
+ * Resolves the "IdeaForge AI Data" folder in My Drive root (creates if missing).
+ * Serialized with a mutex so concurrent inits do not create duplicate folders.
+ */
+async function ensureDataFolderId(allowRetry: boolean): Promise<string> {
+  if (cachedDataFolderId) {
+    return cachedDataFolderId;
+  }
+  if (dataFolderCreationLock) {
+    await dataFolderCreationLock;
+    if (cachedDataFolderId) {
+      return cachedDataFolderId;
+    }
+    throw new Error("IdeaForge data folder initialization did not complete");
+  }
+
+  dataFolderCreationLock = (async () => {
+    try {
+      const items = await driveListFoldersInRoot(allowRetry);
+      let folderId: string | undefined;
+      for (const f of items) {
+        if (typeof f.id === "string" && f.id.length > 0) {
+          folderId = f.id;
+          break;
+        }
+      }
+      if (!folderId) {
+        folderId = await driveCreateDataFolder(allowRetry);
+      }
+      cachedDataFolderId = folderId;
+      return folderId;
+    } finally {
+      dataFolderCreationLock = null;
+    }
+  })();
+
+  return dataFolderCreationLock;
+}
+
+async function listDatabaseSpreadsheetsInFolder(
+  folderId: string,
+  allowRetry: boolean,
+): Promise<{ id: string; name: string }[]> {
+  const escapedTitle = DB_SPREADSHEET_TITLE.replace(/'/g, "\\'");
+  const q = `name='${escapedTitle}' and '${folderId}' in parents and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`;
+  try {
+    const response = await gapi.client.drive.files.list({
+      q,
+      fields: "files(id,name)",
+      pageSize: 10,
+    });
+    const result = response.result as DriveFilesListResult;
+    const raw = result.files ?? [];
+    const files: { id: string; name: string }[] = [];
+    for (const f of raw) {
+      const id = f.id;
+      if (typeof id === "string" && id.length > 0) {
+        const name = typeof f.name === "string" ? f.name : "";
+        files.push({ id, name });
+      }
+    }
+    return files;
+  } catch (error: unknown) {
+    const err = error as { status?: number };
+    if ((err.status === 401 || err.status === 403) && allowRetry) {
+      await handleTokenExpiration();
+      const token = getAccessToken();
+      if (!token) throw new Error("Not authenticated: no access token");
+      gapi.client.setToken({ access_token: token });
+      await new Promise((r) => setTimeout(r, 400));
+      return listDatabaseSpreadsheetsInFolder(folderId, false);
+    }
+    throw new Error(`Drive files.list failed: ${driveApiErrorMessage(error)}`);
+  }
+}
+
+async function createDatabaseSpreadsheet(
+  folderId: string,
+  allowRetry: boolean,
+): Promise<string> {
+  try {
+    const response = await gapi.client.drive.files.create({
+      resource: {
+        name: DB_SPREADSHEET_TITLE,
+        mimeType: "application/vnd.google-apps.spreadsheet",
+        parents: [folderId],
+      },
+      fields: "id",
+    });
+    const result = response.result as DriveFileCreateResult;
+    const id = result.id;
+    if (typeof id !== "string" || id.length === 0) {
+      throw new Error("Drive files.create returned no id");
+    }
+    return id;
+  } catch (error: unknown) {
+    const err = error as { status?: number };
+    if ((err.status === 401 || err.status === 403) && allowRetry) {
+      await handleTokenExpiration();
+      const token = getAccessToken();
+      if (!token) throw new Error("Not authenticated: no access token");
+      gapi.client.setToken({ access_token: token });
+      await new Promise((r) => setTimeout(r, 400));
+      return createDatabaseSpreadsheet(folderId, false);
     }
     throw new Error(`Drive files.create failed: ${driveApiErrorMessage(error)}`);
   }
@@ -791,32 +951,81 @@ async function deleteWorksheetByTitleIfExists(
 }
 
 /**
- * Ensures a spreadsheet named {@link DB_SPREADSHEET_TITLE} exists in the Drive App Data folder and has core worksheets + headers.
+ * Ensures {@link DB_SPREADSHEET_TITLE} exists under the "IdeaForge AI Data" folder in My Drive and has core worksheets + headers.
  */
 export async function initDatabaseSheet(): Promise<{ spreadsheetId: string }> {
-  await loadGapi();
-  const token = getAccessToken();
-  if (!token) {
-    throw new Error("Not authenticated: no access token");
+  try {
+    await loadGapi();
+    const token = getAccessToken();
+    if (!token) {
+      throw new Error("Not authenticated: no access token");
+    }
+
+    const hasDriveFileScope = await tokenHasDriveFileScope(token);
+    if (!hasDriveFileScope) {
+      console.warn(
+        "[IdeaForge DB] Access token is missing drive.file scope. Sign out and sign in again (with consent) to open your database.",
+      );
+      throw new Error(
+        "Google Drive file access is missing. Please sign out and sign in again to grant access to your IdeaForge database.",
+      );
+    }
+
+    gapi.client.setToken({ access_token: token });
+
+    let folderId: string;
+    try {
+      folderId = await ensureDataFolderId(true);
+    } catch (folderErr: unknown) {
+      const msg =
+        folderErr instanceof Error ? folderErr.message : String(folderErr);
+      throw new Error(`Could not prepare IdeaForge data folder: ${msg}`);
+    }
+
+    let files: { id: string; name: string }[];
+    try {
+      files = await listDatabaseSpreadsheetsInFolder(folderId, true);
+    } catch (listErr: unknown) {
+      const msg = listErr instanceof Error ? listErr.message : String(listErr);
+      throw new Error(`Could not list database spreadsheet: ${msg}`);
+    }
+
+    if (files.length > 1) {
+      console.warn(
+        `Multiple spreadsheets named ${DB_SPREADSHEET_TITLE}; using the first (${files[0].id})`,
+      );
+    }
+
+    let spreadsheetId: string;
+    try {
+      spreadsheetId =
+        files.length > 0
+          ? files[0].id
+          : await createDatabaseSpreadsheet(folderId, true);
+    } catch (sheetErr: unknown) {
+      const msg = sheetErr instanceof Error ? sheetErr.message : String(sheetErr);
+      throw new Error(`Could not create or open database spreadsheet: ${msg}`);
+    }
+
+    setSpreadsheetId(spreadsheetId);
+
+    await ensureDatabaseSchema();
+    await deleteWorksheetByTitleIfExists(spreadsheetId, "Sheet1");
+
+    return { spreadsheetId };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (
+      /403|forbidden/i.test(msg) ||
+      isInsufficientDrivePermissionMessage(msg)
+    ) {
+      console.warn(
+        "[IdeaForge DB] Google Drive refused the request (permission). If OAuth scopes were updated, sign out and sign in again.",
+        msg,
+      );
+    }
+    throw e instanceof Error ? e : new Error(msg);
   }
-  gapi.client.setToken({ access_token: token });
-
-  const files = await driveListAppDataSpreadsheet(true);
-  if (files.length > 1) {
-    console.warn(
-      `Multiple spreadsheets named ${DB_SPREADSHEET_TITLE}; using the first (${files[0].id})`,
-    );
-  }
-
-  const spreadsheetId =
-    files.length > 0 ? files[0].id : await driveCreateAppDataSpreadsheet(true);
-
-  setSpreadsheetId(spreadsheetId);
-
-  await ensureDatabaseSchema();
-  await deleteWorksheetByTitleIfExists(spreadsheetId, "Sheet1");
-
-  return { spreadsheetId };
 }
 
 /**
